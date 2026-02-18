@@ -327,7 +327,7 @@ def apply_mappings(df_po, master_file, order_form_file):
         df_po[['KR CODE', 'Match Source', 'Match Key', 'Source Row']] = df_po.apply(find_kr_code, axis=1)
 
         # Output correct columns based on file type
-        desired_columns = ['KR CODE', 'Match Source', 'Match Key', 'Source Row', 'True Quantity', 'Barcode', 'Article']
+        desired_columns = ['KR CODE', 'Match Source', 'Match Key', 'Source Row', 'True Quantity', 'FAM', 'Barcode', 'Article']
         if po_desc_col: desired_columns.append(po_desc_col)
         
         final_cols = [col for col in desired_columns if col in df_po.columns]
