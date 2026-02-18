@@ -1,0 +1,12 @@
+*.pdf
+*.xlsx
+*.pyc
+__pycache__
+venv
+.git
+.gitignore
+README.md
+inspection_output.txt
+debug_output.txt
+inspect_files.py
+lulu.py
