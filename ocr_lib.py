@@ -267,9 +267,11 @@ def parse_carrefour_excel(excel_file):
                     max_text_len = avg_len
                     desc_col = col_idx
         
-        # Find quantity: column with small numbers (integers OR floats like 24.0)
+        # Find quantity: column with small numbers AFTER the description column
+        # (QTY UC comes after ITEM DESCRIPTION; FAM column with category codes comes before)
         if qty_col is None:
-            for col_idx in range(len(df.columns)):
+            search_start = (desc_col + 1) if desc_col is not None else 0
+            for col_idx in range(search_start, len(df.columns)):
                 if col_idx in [barcode_col, desc_col, article_col]:
                     continue
                 col_data = df.iloc[:, col_idx].astype(str)
