@@ -4,9 +4,10 @@ This application automates the mapping of Purchase Orders (POs) from LuLu and Ne
 
 ## Features
 
-- **Universal Parser**: Handles both LuLu and Nesto PDF formats automatically.
+- **Universal Parser**: Handles LuLu, Nesto (PDF/Order Form), and **Carrefour Faxes (OCR)**.
 - **Dynamic Mapping**: Supports fallback to Order Forms if Master File lookup fails.
 - **Smart Column Alignment**: Fixes PDF parsing issues where columns are dropped on later pages.
+- **OCR Integration**: Built-in support for scanned PDFs using [OCR.space](https://ocr.space/) API.
 - **User Friendly**: Simple drag-and-drop interface powered by Streamlit.
 
 ## Installation

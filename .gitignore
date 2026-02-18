@@ -28,3 +28,9 @@ ENV/
 
 # Streamlit
 .streamlit/
+
+# Dev / Debug info
+inspect_*.py
+test_*.py
+*.json
+*.txt

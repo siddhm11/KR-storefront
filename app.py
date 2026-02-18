@@ -4,11 +4,21 @@ import pandas as pd
 import numpy as np
 import re
 import io
+import requests
+from ocr_lib import get_carrefour_data
+import requests # Ensure requests is imported
+from ocr_lib import get_carrefour_data # Import OCR logic
 
 # Set up the web page
 st.set_page_config(page_title="Universal PO & Multi-Layer Mapper", layout="wide")
 st.title("📄 Universal PO Converter & Multi-Layer Mapper")
-st.markdown("Works for **LuLu & Nesto**! Upload your **Master File**, the **Retailer Order Form** (Fallback), and the **PDF PO**. The app dynamically adapts to different column names to find the exact KR CODE!")
+st.markdown("Works for **LuLu, Nesto, & Carrefour (Fax)**! Upload your **Master File**, the **Retailer Order Form** (Fallback), and the **PDF PO**. The app dynamically adapts to different column names to find the exact KR CODE!")
+
+# API Key for OCR (Optional)
+with st.sidebar:
+    st.header("OCR Settings")
+    ocr_api_key = st.text_input("OCR.space API Key", value="helloworld", type="password", help="Get a free key from https://ocr.space/ocrapi")
+    st.info("Default 'helloworld' key works for testing but is rate-limited.")
 
 # --- FUNCTION 1: CLEAN KEYS FOR BARCODE MAPPING ---
 def clean_key(val):
@@ -27,7 +37,7 @@ def clean_desc(val):
     return re.sub(r'\s+', ' ', cleaned_text)
 
 # --- FUNCTION 3: PROCESS PDF AND CALCULATE TRUE QUANTITY ---
-def process_pdf(pdf_file):
+def process_pdf(pdf_file, api_key=None):
     all_rows = []
     
     try:
@@ -38,8 +48,19 @@ def process_pdf(pdf_file):
                     all_rows.extend(table)
                     
         if not all_rows:
-            st.error("No tables found in the PDF. It might be scanned or image-based.")
-            return None
+            # Fallback to OCR if no text found (Scanned PDF)
+            st.warning("No text found in PDF. Attempting OCR (Optical Character Recognition)...")
+            if api_key:
+                df_ocr = get_carrefour_data(pdf_file, api_key=api_key)
+                if df_ocr is not None and not df_ocr.empty:
+                    st.success(f"OCR Successful! Extracted {len(df_ocr)} rows.")
+                    return df_ocr
+                else:
+                    st.error("OCR failed to extract data. Is the API Key valid?")
+                    return None
+            else:
+                st.error("Text not found and no OCR API Key provided.")
+                return None
 
         # --- SMART COLUMN ALIGNMENT ---
         # pdfplumber sometimes drops unnamed/empty columns on later pages.
@@ -306,7 +327,7 @@ st.divider()
 if po_file is not None and master_file is not None:
     
     with st.spinner("Processing files and hunting for KR Codes..."):
-        parsed_po_df = process_pdf(po_file)
+        parsed_po_df = process_pdf(po_file, api_key=ocr_api_key)
         
         if parsed_po_df is not None:
             final_df = apply_mappings(parsed_po_df, master_file, order_file)
