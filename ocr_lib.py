@@ -103,13 +103,20 @@ def parse_ocr_json(data):
                 top = line['Words'][0]['Top']
                 text = line['LineText']
                 
-                # Barcode Logic
+                # Barcode Logic (Top ~120-150, but sometimes garbage)
                 if 100 <= top <= 400:
-                    # Clean barcode (remove spaces)
                     bc = text.replace(" ", "").strip()
-                    if bc.isdigit() and len(bc) > 8:
+                    # Allow alphanum but prefer digits. "UUZ" is likely garbage but keep for now?
+                    # Better to strict filter garbage.
+                    if len(bc) > 3: 
                         row_dict['Barcode'] = bc
                         
+                # Item Code / Article Logic (Top ~520)
+                elif 500 <= top <= 600:
+                    ac = text.replace(" ", "").strip()
+                    if len(ac) > 3:
+                        row_dict['Article'] = ac
+
                 # Description Logic
                 elif 900 <= top <= 1800:
                     desc_parts.append(text)
@@ -131,9 +138,14 @@ def parse_ocr_json(data):
             if desc_parts:
                 row_dict['Description'] = " ".join(desc_parts)
                 
-            # Filter valid rows: Must have Barcode and Quantity (or at least Barcode)
-            if 'Barcode' in row_dict:
+            # Filter valid rows: Must have at least Description OR Barcode OR Article
+            # AND preferably a Quantity (though sometimes quantity is missed).
+            # Relaxed filter to catch rows with just Description + Qty
+            if ('Description' in row_dict or 'Barcode' in row_dict or 'Article' in row_dict) and ('Quantity' in row_dict):
                 rows_data.append(row_dict)
+            elif 'Barcode' in row_dict and 'Description' in row_dict:
+                 # Accept even if Qty missing (maybe 0?)
+                 rows_data.append(row_dict)
 
     if not rows_data:
         return None
