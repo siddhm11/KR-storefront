@@ -40,9 +40,14 @@ streamlit run app.py
 
 ## Deployment (Vercel)
 
-Ensure `requirements.txt` is present. Vercel supports Python runtimes, but for Streamlit specifically, consider **Streamlit Community Cloud** for best compatibility.
+**Crucial Step**: In your Vercel Project Settings > Build & Development settings:
+1. **Framework Preset**: select "Other"
+2. **Build Command**: `mkdir public` (Streamlit doesn't need a build step, but Vercel expects one)
+3. **Install Command**: `pip install -r requirements.txt --break-system-packages`
+   - *Note: Vercel uses a system-managed Python environment, so `--break-system-packages` is required to install libraries globally in the container.*
+4. **Output Directory**: `public`
 
-If deploying to Vercel, you may need to configure a `vercel.json` or use a custom build command.
+⚠️ **Warning**: Vercel has a 10-second timeout for serverless functions on the free tier. Streamlit apps are long-running processes and WILL likely timeout or fail to run properly on Vercel. **Streamlit Community Cloud is highly recommended instead.**
 
 ## Files
 
