@@ -5,20 +5,32 @@ import numpy as np
 import re
 import io
 import requests
-from ocr_lib import get_carrefour_data
-import requests # Ensure requests is imported
-from ocr_lib import get_carrefour_data # Import OCR logic
+from ocr_lib import get_carrefour_data, parse_carrefour_excel
 
 # Set up the web page
 st.set_page_config(page_title="Universal PO & Multi-Layer Mapper", layout="wide")
 st.title("📄 Universal PO Converter & Multi-Layer Mapper")
 st.markdown("Works for **LuLu, Nesto, & Carrefour (Fax)**! Upload your **Master File**, the **Retailer Order Form** (Fallback), and the **PDF PO**. The app dynamically adapts to different column names to find the exact KR CODE!")
 
-# API Key for OCR (Optional)
+# OCR Settings (for scanned PDFs like Carrefour Fax)
 with st.sidebar:
-    st.header("OCR Settings")
-    ocr_api_key = st.text_input("OCR.space API Key", value="helloworld", type="password", help="Get a free key from https://ocr.space/ocrapi")
-    st.info("Default 'helloworld' key works for testing but is rate-limited.")
+    st.header("OCR Settings (Carrefour Fax)")
+    ocr_engine = st.selectbox("OCR Engine", ["ocrspace", "webservice"], index=0,
+        help="'webservice' = onlineocr.net engine (better quality, needs signup). 'ocrspace' = free fallback.")
+    
+    if ocr_engine == 'webservice':
+        st.markdown("[Sign up free at ocrwebservice.com](https://www.ocrwebservice.com/account/signup) — 25 pages/day")
+        ws_username = st.text_input("Username", help="Your ocrwebservice.com username")
+        ws_license = st.text_input("License Code", type="password", help="Your ocrwebservice.com license code")
+        ocr_api_key = None
+    else:
+        ocr_api_key = st.text_input("OCR.space API Key", value="helloworld", type="password", help="Get a free key from https://ocr.space/ocrapi")
+        ws_username = None
+        ws_license = None
+        st.info("Default 'helloworld' key works for testing but is rate-limited.")
+    
+    st.divider()
+    st.markdown("**Tip:** For best results, convert the fax to Excel on [onlineocr.net](https://www.onlineocr.net) and upload the Excel directly as your PO file.")
 
 # --- FUNCTION 1: CLEAN KEYS FOR BARCODE MAPPING ---
 def clean_key(val):
@@ -37,7 +49,7 @@ def clean_desc(val):
     return re.sub(r'\s+', ' ', cleaned_text)
 
 # --- FUNCTION 3: PROCESS PDF AND CALCULATE TRUE QUANTITY ---
-def process_pdf(pdf_file, api_key=None):
+def process_pdf(pdf_file, api_key=None, ocr_engine='ocrspace', ws_username=None, ws_license=None):
     all_rows = []
     
     try:
@@ -50,16 +62,18 @@ def process_pdf(pdf_file, api_key=None):
         if not all_rows:
             # Fallback to OCR if no text found (Scanned PDF)
             st.warning("No text found in PDF. Attempting OCR (Optical Character Recognition)...")
-            if api_key:
-                df_ocr = get_carrefour_data(pdf_file, api_key=api_key)
-                if df_ocr is not None and not df_ocr.empty:
-                    st.success(f"OCR Successful! Extracted {len(df_ocr)} rows.")
-                    return df_ocr
-                else:
-                    st.error("OCR failed to extract data. Is the API Key valid?")
-                    return None
+            df_ocr = get_carrefour_data(
+                pdf_file,
+                ocr_engine=ocr_engine,
+                api_key=api_key if api_key else 'helloworld',
+                ws_username=ws_username,
+                ws_license=ws_license
+            )
+            if df_ocr is not None and not df_ocr.empty:
+                st.success(f"OCR Successful! Extracted {len(df_ocr)} rows.")
+                return df_ocr
             else:
-                st.error("Text not found and no OCR API Key provided.")
+                st.error("OCR failed to extract data. Check your API credentials.")
                 return None
 
         # --- SMART COLUMN ALIGNMENT ---
@@ -318,8 +332,8 @@ with col2:
     order_file = st.file_uploader("Upload Retailer Order File (Optional)", type=["xlsx", "xls", "csv"])
 
 with col3:
-    st.subheader("3. PDF PO")
-    po_file = st.file_uploader("Upload LuLu/Nesto PDF PO", type=["pdf"])
+    st.subheader("3. PO File")
+    po_file = st.file_uploader("Upload PO (PDF or Excel from OCR)", type=["pdf", "xlsx", "xls"])
 
 st.divider()
 
@@ -327,7 +341,16 @@ st.divider()
 if po_file is not None and master_file is not None:
     
     with st.spinner("Processing files and hunting for KR Codes..."):
-        parsed_po_df = process_pdf(po_file, api_key=ocr_api_key)
+        # Route: Excel PO (from onlineocr.net) vs PDF PO
+        file_name = po_file.name.lower()
+        if file_name.endswith(('.xlsx', '.xls')):
+            st.info("Detected Excel PO file. Parsing as Carrefour fax conversion...")
+            parsed_po_df = parse_carrefour_excel(po_file)
+        else:
+            parsed_po_df = process_pdf(po_file, api_key=ocr_api_key,
+                                       ocr_engine=ocr_engine,
+                                       ws_username=ws_username,
+                                       ws_license=ws_license)
         
         if parsed_po_df is not None:
             final_df = apply_mappings(parsed_po_df, master_file, order_file)
