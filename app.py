@@ -370,6 +370,11 @@ if po_file is not None and master_file is not None:
                                        ws_license=ws_license)
         
         if parsed_po_df is not None:
+            # Normalize: ensure 'True Quantity' exists for all input types
+            # LuLu/Nesto have it from calculate_true_quantity(); OCR/Excel only have 'Quantity'
+            if 'True Quantity' not in parsed_po_df.columns and 'Quantity' in parsed_po_df.columns:
+                parsed_po_df['True Quantity'] = parsed_po_df['Quantity']
+            
             final_df = apply_mappings(parsed_po_df, master_file, order_file)
             
             if final_df is not None:
