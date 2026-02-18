@@ -322,10 +322,14 @@ NOISE_KEYWORDS = [
     'MUSCAT', 'OMAN', 'SEEB', 'TERMS', 'SPECIAL CONDITIONS',
     'P.O. BOX', 'PURCHASE ORDER', 'SUPPLIER', 'BAR CODE',
     'CURRENCY', 'DEPARTMENT', 'SECTION', 'DELIVERED',
-    'DELIVERY DATE', 'DEADLINE', 'CONTACT', 'PAGE',
-    'MAJID AL FUTTAIM', 'HYPERMARKETS', 'TEL', 'FAX',
+    'DELIVERY DATE', 'DEADLINE', 'CONTACT', 'PAGE :',
+    'MAJID AL FUTTAIM', 'HYPERMARKETS', 'TEL :', 'FAX :',
     'Retail.Any', 'assignment', 'null and void', 'force and effect',
-    '-----', '=====', 'CHEQUE', 'PAYMENT'
+    '-----', '=====', 'CHEQUE', 'PAYMENT',
+    'INVOICE', 'DELIVERIES', 'PARTIAL DELIVER', 'SIGNATURE',
+    'COMPUTER GENERATED', 'ORDER DATE', 'VAT REGISTERED',
+    'OMANI RIALS', 'SUP TRN', 'KHIMJI RAMDAS',
+    'TRN #', 'DAYS END OF MONTH',
 ]
 
 def clean_noise_rows(df):
@@ -349,12 +353,23 @@ def clean_noise_rows(df):
             if keyword.upper() in desc:
                 return True
         
+        # Also check barcode field for noise keywords (sometimes entire header ends up there)
+        if barcode:
+            barcode_upper = barcode.upper()
+            for keyword in NOISE_KEYWORDS:
+                if keyword.upper() in barcode_upper:
+                    return True
+        
         # If barcode is present and clearly not a barcode (all letters, no digits)
         if barcode and not any(c.isdigit() for c in barcode):
             return True
         
         # If barcode looks like location/text (e.g., "MUSCAT")
         if barcode and barcode.isalpha() and len(barcode) > 2:
+            return True
+        
+        # If barcode contains a decimal point → probably a total/summary, not a real barcode
+        if barcode and '.' in barcode and not desc:
             return True
             
         # If BOTH description and barcode are empty/missing → noise
