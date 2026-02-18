@@ -205,8 +205,13 @@ def apply_mappings(df_po, master_file, order_form_file):
             if desc_col_name in df_master.columns:
                 df_master[desc_col_name] = df_master[desc_col_name].apply(clean_desc)
                 
-            master_gtin_dict = df_master[df_master['GTIN'] != ""].set_index('GTIN')['Article'].to_dict()
-            master_desc_dict = df_master[df_master[desc_col_name] != ""].set_index(desc_col_name)['Article'].to_dict() if desc_col_name in df_master.columns else {}
+            # Store (kr_code, source_row) tuples for provenance tracking
+            master_gtin_dict = {row['GTIN']: (row['Article'], idx + 2)
+                                for idx, row in df_master.iterrows()
+                                if row['GTIN'] != ""}
+            master_desc_dict = {row[desc_col_name]: (row['Article'], idx + 2)
+                                for idx, row in df_master.iterrows()
+                                if desc_col_name in df_master.columns and row.get(desc_col_name, "") != ""}
             st.success("✅ Master Mapping (ZDET-PRICE) loaded!")
         else:
             st.error("🚨 Missing GTIN/Article headers in Master File.")
@@ -247,17 +252,24 @@ def apply_mappings(df_po, master_file, order_form_file):
                 of_desc = 'PRODUCT' if 'PRODUCT' in df_order.columns else ('PRODUCT DESCRIPTION' if 'PRODUCT DESCRIPTION' in df_order.columns else None)
                 
                 # Build Order Form Dictionaries based on what was found
+                # Store (kr_code, source_row) tuples for provenance tracking
                 if of_barcode and of_kr:
                     df_order[of_barcode] = df_order[of_barcode].apply(clean_key)
-                    order_barcode_dict = df_order[df_order[of_barcode] != ""].set_index(of_barcode)[of_kr].to_dict()
+                    order_barcode_dict = {row[of_barcode]: (row[of_kr], idx + 2)
+                                          for idx, row in df_order.iterrows()
+                                          if row[of_barcode] != ""}
                 
                 if of_retailer and of_kr:
                     df_order[of_retailer] = df_order[of_retailer].apply(clean_key)
-                    order_retailer_dict = df_order[df_order[of_retailer] != ""].set_index(of_retailer)[of_kr].to_dict()
+                    order_retailer_dict = {row[of_retailer]: (row[of_kr], idx + 2)
+                                           for idx, row in df_order.iterrows()
+                                           if row[of_retailer] != ""}
                     
                 if of_desc and of_kr:
                     df_order[of_desc] = df_order[of_desc].apply(clean_desc)
-                    order_desc_dict = df_order[df_order[of_desc] != ""].set_index(of_desc)[of_kr].to_dict()
+                    order_desc_dict = {row[of_desc]: (row[of_kr], idx + 2)
+                                       for idx, row in df_order.iterrows()
+                                       if row[of_desc] != ""}
                     
                 st.success(f"✅ Order Form Fallback loaded! (Found: {of_retailer or 'N/A'} & {of_kr or 'N/A'})")
             else:
@@ -279,7 +291,7 @@ def apply_mappings(df_po, master_file, order_form_file):
         if 'Article' in df_po.columns: df_po['Article Code'] = df_po['Article'].apply(clean_key)
         else: df_po['Article Code'] = ""
 
-        # The Waterfall Mapping Function
+        # The Waterfall Mapping Function (returns tuple for provenance)
         def find_kr_code(row):
             barcode = row.get('Barcode_Clean', "")
             po_article = row.get('Article Code', "")
@@ -287,30 +299,35 @@ def apply_mappings(df_po, master_file, order_form_file):
             
             # Layer 1: Master File Barcode (GTIN)
             if barcode != "" and barcode in master_gtin_dict:
-                return master_gtin_dict[barcode]
+                kr, src_row = master_gtin_dict[barcode]
+                return pd.Series([kr, "Master (GTIN)", barcode, src_row])
                 
             # Layer 2: Order Form Barcode
             if barcode != "" and barcode in order_barcode_dict:
-                return order_barcode_dict[barcode]
+                kr, src_row = order_barcode_dict[barcode]
+                return pd.Series([kr, "Order Form (Barcode)", barcode, src_row])
                 
             # Layer 3: Order Form Retailer Code (LuLu Code / Nesto Code → PO Article)
             if po_article != "" and po_article in order_retailer_dict:
-                return order_retailer_dict[po_article]
+                kr, src_row = order_retailer_dict[po_article]
+                return pd.Series([kr, "Order Form (Retailer Code)", po_article, src_row])
                 
             # Layer 4: Master File Description
             if desc != "" and desc in master_desc_dict:
-                return master_desc_dict[desc]
+                kr, src_row = master_desc_dict[desc]
+                return pd.Series([kr, "Master (Description)", desc[:40], src_row])
                 
             # Layer 5: Order Form Description
             if desc != "" and desc in order_desc_dict:
-                return order_desc_dict[desc]
+                kr, src_row = order_desc_dict[desc]
+                return pd.Series([kr, "Order Form (Description)", desc[:40], src_row])
                 
-            return "Not Found"
+            return pd.Series(["Not Found", "-", "-", "-"])
 
-        df_po['KR CODE'] = df_po.apply(find_kr_code, axis=1)
+        df_po[['KR CODE', 'Match Source', 'Match Key', 'Source Row']] = df_po.apply(find_kr_code, axis=1)
 
         # Output correct columns based on file type
-        desired_columns = ['KR CODE', 'True Quantity', 'Barcode', 'Article']
+        desired_columns = ['KR CODE', 'Match Source', 'Match Key', 'Source Row', 'True Quantity', 'Barcode', 'Article']
         if po_desc_col: desired_columns.append(po_desc_col)
         
         final_cols = [col for col in desired_columns if col in df_po.columns]
