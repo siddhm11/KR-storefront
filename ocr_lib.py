@@ -205,6 +205,7 @@ def parse_carrefour_excel(excel_file):
     """
     Parses an Excel file produced by onlineocr.net or ocrwebservice.com.
     Auto-detects barcode/description/quantity columns.
+    Strategy: Try header-based detection first, then heuristic fallback.
     """
     try:
         df = pd.read_excel(excel_file, header=None)
@@ -215,68 +216,69 @@ def parse_carrefour_excel(excel_file):
     if df.empty:
         return None
     
-    # The Excel from onlineocr.net might have the table starting after some header rows.
-    # Strategy: Find the row containing barcode-like values (13-digit numbers).
-    
-    # Step 1: Find which column contains barcodes (13-digit numbers)
     barcode_col = None
     desc_col = None
     qty_col = None
     article_col = None
     header_row_idx = None
     
-    for col_idx in range(len(df.columns)):
-        col_data = df.iloc[:, col_idx].astype(str)
-        # Count how many cells look like barcodes (8-13 digit numbers)
-        barcode_count = col_data.apply(lambda x: bool(re.match(r'^\d{8,13}$', x.strip()))).sum()
-        if barcode_count >= 3:  # At least 3 barcode-looking values
-            barcode_col = col_idx
+    # ── Step 1: ALWAYS try header-based detection first ──
+    for row_idx in range(min(15, len(df))):
+        row_vals = [str(v).upper() if pd.notna(v) else '' for v in df.iloc[row_idx]]
+        row_str = " ".join(row_vals)
+        
+        # Look for header rows containing barcode/qty keywords
+        if ('BAR' in row_str and 'CODE' in row_str) or ('QTY' in row_str) or ('ITEM' in row_str and 'DESC' in row_str):
+            header_row_idx = row_idx
+            for col_idx, val in enumerate(df.iloc[row_idx]):
+                val_str = str(val).upper() if pd.notna(val) else ''
+                if 'BAR' in val_str and 'CODE' in val_str:
+                    barcode_col = col_idx
+                elif 'BAR' in val_str and barcode_col is None:
+                    barcode_col = col_idx
+                elif ('DESC' in val_str or 'ITEM' in val_str) and desc_col is None:
+                    desc_col = col_idx
+                elif ('QTY' in val_str or 'QUANTITY' in val_str) and qty_col is None:
+                    qty_col = col_idx
+                elif ('SUPPLIER' in val_str and 'REF' in val_str) and article_col is None:
+                    article_col = col_idx
             break
     
+    # ── Step 2: Heuristic fallback for any columns not found ──
+    
+    # Find barcode column by digit count if not found from headers
     if barcode_col is None:
-        # Try to find it by header keywords
-        for row_idx in range(min(10, len(df))):
-            row_str = " ".join([str(v).upper() for v in df.iloc[row_idx] if pd.notna(v)])
-            if 'BAR' in row_str and 'CODE' in row_str:
-                header_row_idx = row_idx
-                for col_idx, val in enumerate(df.iloc[row_idx]):
-                    val_str = str(val).upper() if pd.notna(val) else ''
-                    if 'BAR' in val_str:
-                        barcode_col = col_idx
-                    elif 'DESC' in val_str or 'ITEM' in val_str:
-                        desc_col = col_idx
-                    elif 'QTY' in val_str or 'QUANTITY' in val_str:
-                        qty_col = col_idx
-                    elif 'SUPPLIER' in val_str or 'REF' in val_str or 'ARTICLE' in val_str:
-                        article_col = col_idx
+        for col_idx in range(len(df.columns)):
+            col_data = df.iloc[:, col_idx].astype(str)
+            barcode_count = col_data.apply(lambda x: bool(re.match(r'^\d{8,13}$', x.strip()))).sum()
+            if barcode_count >= 3:
+                barcode_col = col_idx
                 break
     
-    # Step 2: If we found the barcode column, guess others by position
     if barcode_col is not None:
-        # Typical Carrefour fax layout: Barcode | Article | ... | Description | ... | Qty
-        # Find description: the column with the longest text strings
+        # Find description: column with the longest average text
         if desc_col is None:
             max_text_len = 0
             for col_idx in range(len(df.columns)):
-                if col_idx == barcode_col:
+                if col_idx in [barcode_col, qty_col, article_col]:
                     continue
                 avg_len = df.iloc[:, col_idx].astype(str).apply(len).mean()
                 if avg_len > max_text_len:
                     max_text_len = avg_len
                     desc_col = col_idx
         
-        # Find quantity: column with small integers (1-999)
+        # Find quantity: column with small numbers (integers OR floats like 24.0)
         if qty_col is None:
             for col_idx in range(len(df.columns)):
-                if col_idx in [barcode_col, desc_col]:
+                if col_idx in [barcode_col, desc_col, article_col]:
                     continue
                 col_data = df.iloc[:, col_idx].astype(str)
-                qty_count = col_data.apply(lambda x: bool(re.match(r'^\d{1,4}$', x.strip()))).sum()
+                qty_count = col_data.apply(lambda x: bool(re.match(r'^\d{1,4}(\.0)?$', x.strip()))).sum()
                 if qty_count >= 3:
                     qty_col = col_idx
                     break
         
-        # Find article: column with 6-9 digit codes (like 000167362)
+        # Find article: column with leading-zero codes (like 000167362)
         if article_col is None:
             for col_idx in range(len(df.columns)):
                 if col_idx in [barcode_col, desc_col, qty_col]:
@@ -291,10 +293,11 @@ def parse_carrefour_excel(excel_file):
         st.error("Could not identify Barcode or Description columns in the Excel file.")
         return None
     
-    # Step 3: Build the result DataFrame
-    result = pd.DataFrame()
+    # Log what was detected for debugging
+    st.info(f"Columns detected → Barcode: col {barcode_col}, Desc: col {desc_col}, Qty: col {qty_col}, Article: col {article_col}")
     
-    # Start from after the header row if found
+    # ── Step 3: Build the result DataFrame ──
+    result = pd.DataFrame()
     start_row = (header_row_idx + 1) if header_row_idx is not None else 0
     
     if barcode_col is not None:
@@ -309,7 +312,7 @@ def parse_carrefour_excel(excel_file):
     result['UOM'] = 'EA'
     result = result.reset_index(drop=True)
     
-    # Step 4: Clean noise rows
+    # ── Step 4: Clean noise rows ──
     result = clean_noise_rows(result)
     
     return result if not result.empty else None
