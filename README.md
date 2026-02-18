@@ -40,14 +40,19 @@ streamlit run app.py
 
 ## Deployment (Vercel)
 
-**Crucial Step**: In your Vercel Project Settings > Build & Development settings:
-1. **Framework Preset**: select "Other"
-2. **Build Command**: `mkdir public` (Streamlit doesn't need a build step, but Vercel expects one)
-3. **Install Command**: `pip install -r requirements.txt --break-system-packages`
-   - *Note: Vercel uses a system-managed Python environment, so `--break-system-packages` is required to install libraries globally in the container.*
-4. **Output Directory**: `public`
+### 🚨 ERROR: "streamlit: command not found"?
+This error happens if you set **Build Command** to `streamlit run app.py`.
+**FIX:** Change **Build Command** to `mkdir -p public` (or leave empty).
 
-⚠️ **Warning**: Vercel has a 10-second timeout for serverless functions on the free tier. Streamlit apps are long-running processes and WILL likely timeout or fail to run properly on Vercel. **Streamlit Community Cloud is highly recommended instead.**
+### 🚨 ERROR: "Bundle size exceeds limit"?
+Vercel has a hard 250MB limit which Streamlit + Pandas often exceeds.
+
+### 🏆 RECOMMENDED: Streamlit Community Cloud
+Since Vercel is not designed for Streamlit (it will timeout after 10s), the **best** loading experience is:
+1. Go to [share.streamlit.io](https://share.streamlit.io)
+2. Connect GitHub
+3. Select this repo: `siddhm11/KR-storefront`
+4. Click **Deploy**. Done!
 
 ## Files
 
