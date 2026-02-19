@@ -535,7 +535,9 @@ def apply_mappings(df_po, master_file, order_form_file):
         if po_desc_col: desired_columns.append(po_desc_col)
         
         final_cols = [col for col in desired_columns if col in df_po.columns]
-        return df_po[final_cols]
+        result = df_po[final_cols].reset_index(drop=True)
+        result.index = result.index + 1  # Start row numbers from 1
+        return result
         
     except Exception as e:
         st.error(f"An error occurred while applying mappings: {e}")
