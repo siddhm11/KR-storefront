@@ -5,6 +5,7 @@ import numpy as np
 import re
 import io
 import requests
+from difflib import SequenceMatcher
 from ocr_lib import get_carrefour_data, parse_carrefour_excel
 
 # Set up the web page
@@ -47,6 +48,100 @@ def clean_desc(val):
         return ""
     cleaned_text = str(val).strip().upper()
     return re.sub(r'\s+', ' ', cleaned_text)
+
+# --- FUNCTION 2b: FUZZY-FRIENDLY TEXT CLEANER ---
+def clean_desc_fuzzy(val):
+    """Clean description for fuzzy matching.
+    Removes pack info like (12), (24), punctuation, extra spaces.
+    Keeps only letters, digits, and spaces for comparison.
+    """
+    if pd.isna(val):
+        return ""
+    s = str(val).strip().upper()
+    s = re.sub(r'\([^)]*\)', '', s)       # Remove (12), (24x500ML), etc.
+    s = re.sub(r'[^A-Z0-9\s]', ' ', s)    # Replace punctuation with space
+    s = re.sub(r'\s+', ' ', s).strip()     # Collapse whitespace
+    return s
+
+# --- FUNCTION 2c: FUZZY DESCRIPTION MATCHING ---
+def fuzzy_match_desc(target, candidates, threshold=0.70):
+    """Find best matching description from candidates list.
+    
+    Args:
+        target: Clean description string to match
+        candidates: List of dicts with keys 'desc', 'article', 'row', 'price', 'raw_desc'
+        threshold: Minimum similarity ratio (0.0 - 1.0)
+    
+    Returns:
+        (article, row, raw_desc, score) tuple or None
+    """
+    if not target or not candidates:
+        return None
+    
+    best_score = 0
+    best_match = None
+    
+    for candidate in candidates:
+        try:
+            cand_desc = candidate['desc']
+            if not cand_desc:
+                continue
+            score = SequenceMatcher(None, target, cand_desc).ratio()
+            if score > best_score:
+                best_score = score
+                best_match = candidate
+        except Exception:
+            continue
+    
+    if best_score >= threshold and best_match:
+        return (best_match['article'], best_match['row'], best_match['raw_desc'], best_score)
+    return None
+
+# --- FUNCTION 2d: PRICE + FUZZY DESCRIPTION MATCHING ---
+def fuzzy_match_with_price(target_desc, target_price, candidates, 
+                            price_tolerance=0.05, desc_threshold=0.60):
+    """Find best match by first filtering on price, then fuzzy matching desc.
+    
+    Args:
+        target_desc: Clean description string to match
+        target_price: Numeric price from the PO
+        candidates: List of dicts with keys 'desc', 'article', 'row', 'price', 'raw_desc'
+        price_tolerance: Price tolerance ratio (0.05 = ±5%)
+        desc_threshold: Minimum description similarity
+    
+    Returns:
+        (article, row, raw_desc, score) tuple or None
+    """
+    if not target_desc or not target_price or not candidates:
+        return None
+    
+    try:
+        target_price = float(target_price)
+    except (ValueError, TypeError):
+        return None
+    
+    if target_price <= 0:
+        return None
+    
+    # Filter candidates by price (within tolerance)
+    price_matches = []
+    for candidate in candidates:
+        try:
+            cand_price = candidate.get('price')
+            if cand_price is None or cand_price <= 0:
+                continue
+            # Check if prices are within tolerance
+            price_diff = abs(cand_price - target_price) / target_price
+            if price_diff <= price_tolerance:
+                price_matches.append(candidate)
+        except (ValueError, TypeError):
+            continue
+    
+    if not price_matches:
+        return None
+    
+    # Among price-matched candidates, find best description match
+    return fuzzy_match_desc(target_desc, price_matches, threshold=desc_threshold)
 
 # --- FUNCTION 3: PROCESS PDF AND CALCULATE TRUE QUANTITY ---
 def process_pdf(pdf_file, api_key=None, ocr_engine='ocrspace', ws_username=None, ws_license=None):
@@ -204,6 +299,26 @@ def apply_mappings(df_po, master_file, order_form_file):
             desc_col_name = "Material Description" if "Material Description" in df_master.columns else "Description"
             if desc_col_name in df_master.columns:
                 df_master[desc_col_name] = df_master[desc_col_name].apply(clean_desc)
+            
+            # Find Master File price column
+            master_price_col = None
+            for c in df_master.columns:
+                cu = c.upper()
+                if 'SELLING' in cu and 'PRICE' in cu:
+                    master_price_col = c
+                    break
+            if master_price_col is None:
+                for c in df_master.columns:
+                    cu = c.upper()
+                    if 'NET' in cu and 'PRICE' in cu:
+                        master_price_col = c
+                        break
+            if master_price_col is None:
+                for c in df_master.columns:
+                    cu = c.upper()
+                    if 'PRICE' in cu or 'COST' in cu:
+                        master_price_col = c
+                        break
                 
             # Store (kr_code, source_row) tuples for provenance tracking
             master_gtin_dict = {row['GTIN']: (row['Article'], idx + 2)
@@ -212,7 +327,30 @@ def apply_mappings(df_po, master_file, order_form_file):
             master_desc_dict = {row[desc_col_name]: (row['Article'], idx + 2)
                                 for idx, row in df_master.iterrows()
                                 if desc_col_name in df_master.columns and row.get(desc_col_name, "") != ""}
-            st.success("✅ Master Mapping (ZDET-PRICE) loaded!")
+            
+            # Build master list for fuzzy matching: [(clean_desc, article, row, price)]
+            master_fuzzy_list = []
+            for idx, row in df_master.iterrows():
+                desc_val = str(row.get(desc_col_name, '')).strip()
+                if desc_val and desc_val.upper() != 'NAN':
+                    price_val = None
+                    if master_price_col:
+                        try:
+                            price_val = float(row.get(master_price_col, 0))
+                        except (ValueError, TypeError):
+                            price_val = None
+                    master_fuzzy_list.append({
+                        'desc': clean_desc_fuzzy(desc_val),
+                        'article': row['Article'],
+                        'row': idx + 2,
+                        'price': price_val,
+                        'raw_desc': desc_val
+                    })
+            
+            if master_price_col:
+                st.success(f"✅ Master Mapping loaded! (Price col: {master_price_col[:30]})")
+            else:
+                st.success("✅ Master Mapping (ZDET-PRICE) loaded!")
         else:
             st.error("🚨 Missing GTIN/Article headers in Master File.")
             return None
@@ -221,6 +359,7 @@ def apply_mappings(df_po, master_file, order_form_file):
         # 2. LOAD ORDER FORM (FALLBACK)
         # ==========================================
         order_barcode_dict, order_retailer_dict, order_desc_dict = {}, {}, {}
+        order_fuzzy_list = []
         
         if order_form_file is not None:
             if order_form_file.name.endswith('.csv'):
@@ -270,8 +409,19 @@ def apply_mappings(df_po, master_file, order_form_file):
                     order_desc_dict = {row[of_desc]: (row[of_kr], idx + 2)
                                        for idx, row in df_order.iterrows()
                                        if row[of_desc] != ""}
+                    # Build order form fuzzy list
+                    for idx, row in df_order.iterrows():
+                        desc_val = str(row.get(of_desc, '')).strip()
+                        if desc_val and desc_val.upper() != 'NAN':
+                            order_fuzzy_list.append({
+                                'desc': clean_desc_fuzzy(desc_val),
+                                'article': row.get(of_kr, ''),
+                                'row': idx + 2,
+                                'price': None,
+                                'raw_desc': desc_val
+                            })
                     
-                st.success(f"✅ Order Form Fallback loaded! (Found: {of_retailer or 'N/A'} & {of_kr or 'N/A'})")
+                st.success(f"✅ Order Form Fallback loaded! ({len(order_fuzzy_list)} items for fuzzy match)")
             else:
                 st.warning("⚠️ Could not find Barcode & KR/SAP Code headers in the Order Form. Skipping fallback.")
 
@@ -281,53 +431,107 @@ def apply_mappings(df_po, master_file, order_form_file):
         # Dynamically identify PO description column (LuLu vs Nesto)
         po_desc_col = 'Article Description + Add.Info' if 'Article Description + Add.Info' in df_po.columns else ('Description' if 'Description' in df_po.columns else None)
         
+        # Find PO price column (LuLu=Gross/PU, Nesto=Unit.Cost, Carrefour=P.PRI B.TAX)
+        po_price_col = None
+        for c in df_po.columns:
+            cu = str(c).upper()
+            if 'GROSS/PU' in cu or 'UNIT.COST' in cu or 'UNIT COST' in cu or 'P.PRI' in cu or 'PPRI' in cu:
+                po_price_col = c
+                break
+        if po_price_col is None:
+            for c in df_po.columns:
+                cu = str(c).upper()
+                if 'PRICE' in cu or 'COST' in cu:
+                    po_price_col = c
+                    break
+        
         # Clean PO matching keys safely
         if 'Barcode' in df_po.columns: df_po['Barcode_Clean'] = df_po['Barcode'].apply(clean_key)
         else: df_po['Barcode_Clean'] = ""
             
         if po_desc_col: df_po['Clean PO Desc'] = df_po[po_desc_col].apply(clean_desc)
         else: df_po['Clean PO Desc'] = ""
+        
+        # Also build fuzzy-friendly PO description
+        if po_desc_col: df_po['Fuzzy PO Desc'] = df_po[po_desc_col].apply(clean_desc_fuzzy)
+        else: df_po['Fuzzy PO Desc'] = ""
             
         if 'Article' in df_po.columns: df_po['Article Code'] = df_po['Article'].apply(clean_key)
         else: df_po['Article Code'] = ""
+        
+        # Extract PO price for each row
+        if po_price_col:
+            df_po['PO_Price'] = pd.to_numeric(df_po[po_price_col], errors='coerce')
+        else:
+            df_po['PO_Price'] = np.nan
+
 
         # The Waterfall Mapping Function (returns tuple for provenance)
         def find_kr_code(row):
-            barcode = row.get('Barcode_Clean', "")
-            po_article = row.get('Article Code', "")
-            desc = row.get('Clean PO Desc', "")
-            
-            # Layer 1: Master File Barcode (GTIN)
-            if barcode != "" and barcode in master_gtin_dict:
-                kr, src_row = master_gtin_dict[barcode]
-                return pd.Series([kr, "Master (GTIN)", barcode, src_row])
+            try:
+                barcode = row.get('Barcode_Clean', "")
+                po_article = row.get('Article Code', "")
+                desc = row.get('Clean PO Desc', "")
+                fuzzy_desc = row.get('Fuzzy PO Desc', "")
+                po_price = row.get('PO_Price', None)
+                if pd.isna(po_price):
+                    po_price = None
                 
-            # Layer 2: Order Form Barcode
-            if barcode != "" and barcode in order_barcode_dict:
-                kr, src_row = order_barcode_dict[barcode]
-                return pd.Series([kr, "Order Form (Barcode)", barcode, src_row])
+                # Layer 1: Master File Barcode (GTIN)
+                if barcode != "" and barcode in master_gtin_dict:
+                    kr, src_row = master_gtin_dict[barcode]
+                    return pd.Series([kr, "L1: Master (GTIN)", barcode, src_row])
+                    
+                # Layer 2: Order Form Barcode
+                if barcode != "" and barcode in order_barcode_dict:
+                    kr, src_row = order_barcode_dict[barcode]
+                    return pd.Series([kr, "L2: Order (Barcode)", barcode, src_row])
+                    
+                # Layer 3: Order Form Retailer Code
+                if po_article != "" and po_article in order_retailer_dict:
+                    kr, src_row = order_retailer_dict[po_article]
+                    return pd.Series([kr, "L3: Order (Retailer)", po_article, src_row])
+                    
+                # Layer 4: Master File Exact Description
+                if desc != "" and desc in master_desc_dict:
+                    kr, src_row = master_desc_dict[desc]
+                    return pd.Series([kr, "L4: Master (Desc)", desc[:40], src_row])
+                    
+                # Layer 5: Order Form Exact Description
+                if desc != "" and desc in order_desc_dict:
+                    kr, src_row = order_desc_dict[desc]
+                    return pd.Series([kr, "L5: Order (Desc)", desc[:40], src_row])
                 
-            # Layer 3: Order Form Retailer Code (LuLu Code / Nesto Code → PO Article)
-            if po_article != "" and po_article in order_retailer_dict:
-                kr, src_row = order_retailer_dict[po_article]
-                return pd.Series([kr, "Order Form (Retailer Code)", po_article, src_row])
+                # Layer 6: Master File Fuzzy Description (70%+ similarity)
+                if fuzzy_desc != "":
+                    best = fuzzy_match_desc(fuzzy_desc, master_fuzzy_list, threshold=0.70)
+                    if best:
+                        kr, src_row, matched, score = best
+                        return pd.Series([kr, f"L6: Master (Fuzzy {score:.0%})", matched[:35], src_row])
                 
-            # Layer 4: Master File Description
-            if desc != "" and desc in master_desc_dict:
-                kr, src_row = master_desc_dict[desc]
-                return pd.Series([kr, "Master (Description)", desc[:40], src_row])
+                # Layer 7: Order Form Fuzzy Description (70%+ similarity)
+                if fuzzy_desc != "" and order_fuzzy_list:
+                    best = fuzzy_match_desc(fuzzy_desc, order_fuzzy_list, threshold=0.70)
+                    if best:
+                        kr, src_row, matched, score = best
+                        return pd.Series([kr, f"L7: Order (Fuzzy {score:.0%})", matched[:35], src_row])
                 
-            # Layer 5: Order Form Description
-            if desc != "" and desc in order_desc_dict:
-                kr, src_row = order_desc_dict[desc]
-                return pd.Series([kr, "Order Form (Description)", desc[:40], src_row])
-                
-            return pd.Series(["Not Found", "-", "-", "-"])
+                # Layer 8: Master File Price + Fuzzy Desc (price match ±5%, desc 60%+)
+                if po_price is not None and po_price > 0 and fuzzy_desc != "":
+                    best = fuzzy_match_with_price(fuzzy_desc, po_price, master_fuzzy_list, 
+                                                  price_tolerance=0.05, desc_threshold=0.60)
+                    if best:
+                        kr, src_row, matched, score = best
+                        return pd.Series([kr, f"L8: Master (Price+Fuzzy {score:.0%})", matched[:35], src_row])
+                    
+                return pd.Series(["Not Found", "-", "-", "-"])
+            except Exception as e:
+                return pd.Series(["Error", str(e)[:30], "-", "-"])
 
         df_po[['KR CODE', 'Match Source', 'Match Key', 'Source Row']] = df_po.apply(find_kr_code, axis=1)
 
         # Output correct columns based on file type
-        desired_columns = ['KR CODE', 'Match Source', 'Match Key', 'Source Row', 'True Quantity', 'FAM', 'Barcode', 'Article']
+        desired_columns = ['KR CODE', 'True Quantity', 'Match Source', 'Match Key', 'Source Row', 'FAM', 'Barcode', 'Article']
         if po_desc_col: desired_columns.append(po_desc_col)
         
         final_cols = [col for col in desired_columns if col in df_po.columns]
