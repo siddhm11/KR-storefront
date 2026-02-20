@@ -191,12 +191,17 @@ def process_pdf(pdf_file, api_key=None, ocr_engine='ocrspace', ws_username=None,
                 break
         
         if header_idx is None:
+            # DEBUG: Show what we searched so we can diagnose
+            st.warning("Could not automatically find the Quantity/UOM headers. Returning raw data.")
+            if all_rows:
+                for di in range(min(3, len(all_rows))):
+                    dbg_str = " ".join([str(val).upper().replace('\n', ' ') for val in all_rows[di] if val is not None])
+                    st.text(f"  Debug Row {di}: {dbg_str[:120]}")
             # Fallback: pad at end and return raw
             max_cols = max(len(r) for r in all_rows)
             all_rows = [r + [None] * (max_cols - len(r)) for r in all_rows]
             df = pd.DataFrame(all_rows)
             df = df.map(lambda x: str(x).replace('\n', ' ').strip() if pd.notnull(x) else x)
-            st.warning("Could not automatically find the Quantity/UOM headers. Returning raw data.")
             return df
         
         header_row = all_rows[header_idx]
