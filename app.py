@@ -142,6 +142,74 @@ def fuzzy_match_with_price(target_desc, target_price, candidates,
     
     # Among price-matched candidates, find best description match
     return fuzzy_match_desc(target_desc, price_matches, threshold=desc_threshold)
+# --- FUNCTION 2e: PARSE WHSMITH EMAIL TEXT ---
+def parse_whsmith_text(text):
+    """Parse WHSmith order data pasted from email.
+    
+    The data has a repeating pattern per product:
+        Item_No (header line)
+        Barcode (header line)
+        Item_Description (header line)
+        Order WK## (header line)
+        
+        item_no_value
+        barcode_value
+        description_value
+        qty_value (e.g. '4 OTR', '24POUCH', '36 BAGS')
+    """
+    lines = [l.strip() for l in text.strip().split('\n') if l.strip()]
+    
+    # Remove header lines (Item_No, Barcode, Item_Description, Order WK##)
+    # Find where data starts (first line that looks like a number/item code)
+    data_start = 0
+    for i, line in enumerate(lines):
+        # Skip header labels
+        if line.lower() in ('item_no', 'barcode', 'item_description') or line.lower().startswith('order '):
+            data_start = i + 1
+            continue
+        # First non-header line
+        if i >= data_start:
+            break
+    
+    data_lines = lines[data_start:]
+    
+    # Parse groups of 4 lines: item_no, barcode, description, qty
+    rows = []
+    i = 0
+    while i < len(data_lines):
+        # Need at least 1 more line (some may be on same line)
+        item_no = data_lines[i].strip() if i < len(data_lines) else ''
+        barcode = data_lines[i+1].strip() if i+1 < len(data_lines) else ''
+        desc = data_lines[i+2].strip() if i+2 < len(data_lines) else ''
+        qty_raw = data_lines[i+3].strip() if i+3 < len(data_lines) else ''
+        
+        # Parse qty+UOM from strings like '4 OTR', '24POUCH', '36 BAGS'
+        qty_match = re.match(r'(\d+)\s*(OTR|POUCH|BAGS|EA|PCS|CTN|CS|CV)?', qty_raw, re.IGNORECASE)
+        if qty_match:
+            qty = int(qty_match.group(1))
+            uom = qty_match.group(2).upper() if qty_match.group(2) else 'EA'
+        else:
+            qty = 0
+            uom = ''
+        
+        if item_no and barcode:
+            rows.append({
+                'Article': item_no,
+                'Barcode': barcode,
+                'Description': desc,
+                'Quantity': qty,
+                'UOM': uom,
+                'Raw Qty': qty_raw
+            })
+        
+        i += 4
+    
+    if not rows:
+        return None
+    
+    df = pd.DataFrame(rows)
+    df['True Quantity'] = df['Quantity']  # Will be overridden after OTR conversion
+    return df
 
 # --- FUNCTION 3: PROCESS PDF AND CALCULATE TRUE QUANTITY ---
 def process_pdf(pdf_file, api_key=None, ocr_engine='ocrspace', ws_username=None, ws_license=None):
@@ -681,22 +749,115 @@ with col3:
     st.subheader("3. PO File")
     po_file = st.file_uploader("Upload PO (PDF or Excel from OCR)", type=["pdf", "xlsx", "xls"])
 
+# WHSmith email paste option
+st.divider()
+with st.expander("📧 **WHSmith Email Order** (Paste text here)", expanded=False):
+    whsmith_text = st.text_area(
+        "Paste the order table from the WHSmith email below:",
+        height=200,
+        placeholder="Item_No\nBarcode\nItem_Description\nOrder WK23\n\n1001010023\n87108408\nFruittella Strawberry\n4 OTR\n..."
+    )
+
 st.divider()
 
-# Run the pipeline only when Master and PO are provided (Order Form is an optional bonus)
-if po_file is not None and master_file is not None:
+# Determine which input to use
+use_whsmith = bool(whsmith_text and whsmith_text.strip())
+
+# Run the pipeline
+if (po_file is not None or use_whsmith) and master_file is not None:
     
     with st.spinner("Processing files and hunting for KR Codes..."):
-        # Route: Excel PO (from onlineocr.net) vs PDF PO
-        file_name = po_file.name.lower()
-        if file_name.endswith(('.xlsx', '.xls')):
-            st.info("Detected Excel PO file. Parsing as Carrefour fax conversion...")
-            parsed_po_df = parse_carrefour_excel(po_file)
-        else:
-            parsed_po_df = process_pdf(po_file, api_key=ocr_api_key,
-                                       ocr_engine=ocr_engine,
-                                       ws_username=ws_username,
-                                       ws_license=ws_license)
+        parsed_po_df = None
+        
+        if use_whsmith:
+            # WHSmith email text route
+            st.info("📧 Processing WHSmith email order text...")
+            parsed_po_df = parse_whsmith_text(whsmith_text)
+            if parsed_po_df is not None:
+                st.success(f"✅ Parsed {len(parsed_po_df)} items from WHSmith email")
+                
+                # OTR→EA Conversion: Load Master File conversion data
+                try:
+                    master_file.seek(0)
+                    if master_file.name.endswith('.csv'):
+                        df_conv = pd.read_csv(master_file, header=None)
+                    else:
+                        df_conv_dict = pd.read_excel(master_file, sheet_name=None, header=None)
+                        df_conv = df_conv_dict.get('ZDET-PRICE', list(df_conv_dict.values())[0])
+                    
+                    # Find header row
+                    conv_header_idx = None
+                    for ci, row in df_conv.iterrows():
+                        row_str = " ".join([str(v).upper() for v in row if pd.notna(v)])
+                        if "ARTICLE" in row_str and "GTIN" in row_str:
+                            conv_header_idx = ci
+                            break
+                    
+                    if conv_header_idx is not None:
+                        df_conv.columns = df_conv.iloc[conv_header_idx]
+                        df_conv = df_conv.iloc[conv_header_idx + 1:].reset_index(drop=True)
+                        
+                        # Build GTIN → conversion factor lookup
+                        conv_col = 'Den. for Conversion 1'
+                        if conv_col in df_conv.columns and 'GTIN' in df_conv.columns:
+                            gtin_conv = {}
+                            for _, row in df_conv.iterrows():
+                                gtin = str(row.get('GTIN', '')).strip()
+                                try:
+                                    gtin = str(int(float(gtin)))
+                                except (ValueError, TypeError):
+                                    pass
+                                conv = row.get(conv_col)
+                                try:
+                                    conv = float(conv)
+                                except (ValueError, TypeError):
+                                    conv = 1.0
+                                if gtin and conv > 0:
+                                    gtin_conv[gtin] = conv
+                            
+                            # Apply OTR→EA conversion
+                            converted = 0
+                            for idx, row in parsed_po_df.iterrows():
+                                uom = str(row.get('UOM', '')).upper()
+                                if uom in ('OTR', 'CV', 'POUCH', 'BAGS', 'CTN', 'CS'):
+                                    barcode = str(row.get('Barcode', '')).strip()
+                                    try:
+                                        barcode = str(int(float(barcode)))
+                                    except (ValueError, TypeError):
+                                        pass
+                                    multiplier = gtin_conv.get(barcode, 1.0)
+                                    orig_qty = row.get('Quantity', 0)
+                                    parsed_po_df.at[idx, 'True Quantity'] = int(orig_qty * multiplier)
+                                    parsed_po_df.at[idx, 'Conversion'] = f"{orig_qty}×{int(multiplier)}"
+                                    converted += 1
+                            
+                            if converted > 0:
+                                st.success(f"✅ Converted {converted} items: OTR/CV → EA using Den. for Conversion 1")
+                            else:
+                                st.info("ℹ️ No OTR/CV items found to convert (all quantities are already in EA)")
+                        else:
+                            st.warning(f"⚠️ Could not find '{conv_col}' column in Master File")
+                    else:
+                        st.warning("⚠️ Could not find header row in Master File for conversion")
+                    
+                    master_file.seek(0)  # Reset for apply_mappings
+                except Exception as e:
+                    st.warning(f"⚠️ OTR conversion failed: {e}. Quantities kept as-is.")
+                    master_file.seek(0)
+            else:
+                st.error("Could not parse any items from the pasted text. Check the format.")
+        
+        elif po_file is not None:
+            # PDF/Excel PO route
+            file_name = po_file.name.lower()
+            if file_name.endswith(('.xlsx', '.xls')):
+                st.info("Detected Excel PO file. Parsing as Carrefour fax conversion...")
+                parsed_po_df = parse_carrefour_excel(po_file)
+            else:
+                parsed_po_df = process_pdf(po_file, api_key=ocr_api_key,
+                                           ocr_engine=ocr_engine,
+                                           ws_username=ws_username,
+                                           ws_license=ws_license)
         
         if parsed_po_df is not None:
             # Normalize: ensure 'True Quantity' exists for all input types
@@ -764,5 +925,5 @@ if po_file is not None and master_file is not None:
                 else:
                     st.warning("KR CODE or True Quantity column not found in output.")
 
-elif po_file is None or master_file is None:
-    st.info("Waiting for the Master File and PDF PO to be uploaded...")
+elif not use_whsmith and (po_file is None or master_file is None):
+    st.info("Waiting for the Master File and a PO (PDF/Excel) or WHSmith email text to be provided...")
