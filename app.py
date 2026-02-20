@@ -819,7 +819,7 @@ if (po_file is not None or use_whsmith) and master_file is not None:
                             converted = 0
                             for idx, row in parsed_po_df.iterrows():
                                 uom = str(row.get('UOM', '')).upper()
-                                if uom in ('OTR', 'CV', 'POUCH', 'BAGS', 'CTN', 'CS'):
+                                if uom == 'OTR':
                                     barcode = str(row.get('Barcode', '')).strip()
                                     try:
                                         barcode = str(int(float(barcode)))
