@@ -439,20 +439,32 @@ def process_pdf(pdf_file, api_key=None, ocr_engine='ocrspace', ws_username=None,
         return None
 
 # --- FUNCTION 4: APPLY MULTI-LAYER MAPPING ---
-def apply_mappings(df_po):
+def apply_mappings(df_po, master_override=None, lulu_override=None, nesto_override=None):
     try:
         # ==========================================
-        # 1. LOAD MASTER FILE (ZDET-PRICE) — HARDCODED
+        # 1. LOAD MASTER FILE (ZDET-PRICE)
         # ==========================================
-        if not os.path.exists(MASTER_FILE_PATH):
-            st.error(f"🚨 Master File not found: {MASTER_FILE_PATH}")
-            return None
-        
-        try:
-            df_master_raw = pd.read_excel(MASTER_FILE_PATH, sheet_name='ZDET-PRICE', header=None)
-        except ValueError:
-            st.error("🚨 Could not find a sheet named 'ZDET-PRICE' in the Master File.")
-            return None
+        if master_override is not None:
+            # User uploaded a newer Master File
+            st.info("📤 Using **uploaded** Master File (override)")
+            try:
+                if master_override.name.endswith('.csv'):
+                    df_master_raw = pd.read_csv(master_override, header=None)
+                else:
+                    df_master_raw = pd.read_excel(master_override, sheet_name='ZDET-PRICE', header=None)
+            except ValueError:
+                st.error("🚨 Could not find 'ZDET-PRICE' sheet in uploaded Master File.")
+                return None
+        else:
+            # Use hardcoded default
+            if not os.path.exists(MASTER_FILE_PATH):
+                st.error(f"🚨 Master File not found: {MASTER_FILE_PATH}")
+                return None
+            try:
+                df_master_raw = pd.read_excel(MASTER_FILE_PATH, sheet_name='ZDET-PRICE', header=None)
+            except ValueError:
+                st.error("🚨 Could not find 'ZDET-PRICE' sheet in the Master File.")
+                return None
 
         df_master = None
         for idx, row in df_master_raw.iterrows():
@@ -596,10 +608,28 @@ def apply_mappings(df_po):
             
             return df_order, bc_dict, ret_dict, desc_dict, fuzzy_list
         
-        # Load Lulu Order Form (primary fallback)
-        _, lulu_bc, lulu_ret, lulu_desc, lulu_fuzzy = load_order_form(LULU_ORDER_PATH, "Lulu Order Form")
-        # Load Nesto Order Form (secondary fallback)
-        _, nesto_bc, nesto_ret, nesto_desc, nesto_fuzzy = load_order_form(NESTO_ORDER_PATH, "Nesto Order Form")
+        # Load Lulu Order Form (use override if uploaded, else hardcoded)
+        if lulu_override is not None:
+            st.info("📤 Using **uploaded** Lulu Order Form (override)")
+            # Save to temp file for load_order_form
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
+                tmp.write(lulu_override.read())
+                lulu_tmp_path = tmp.name
+            _, lulu_bc, lulu_ret, lulu_desc, lulu_fuzzy = load_order_form(lulu_tmp_path, "Lulu Order Form (uploaded)")
+        else:
+            _, lulu_bc, lulu_ret, lulu_desc, lulu_fuzzy = load_order_form(LULU_ORDER_PATH, "Lulu Order Form")
+        
+        # Load Nesto Order Form (use override if uploaded, else hardcoded)
+        if nesto_override is not None:
+            st.info("📤 Using **uploaded** Nesto Order Form (override)")
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
+                tmp.write(nesto_override.read())
+                nesto_tmp_path = tmp.name
+            _, nesto_bc, nesto_ret, nesto_desc, nesto_fuzzy = load_order_form(nesto_tmp_path, "Nesto Order Form (uploaded)")
+        else:
+            _, nesto_bc, nesto_ret, nesto_desc, nesto_fuzzy = load_order_form(NESTO_ORDER_PATH, "Nesto Order Form")
         
         # Keep separate for provenance tracking (L2-1 Lulu vs L2-2 Nesto)
         # Combined dicts for L5 (exact desc) and L7 (fuzzy) where source doesn't matter as much
@@ -782,22 +812,32 @@ with col2:
 
 st.divider()
 
-# Show hardcoded file status
+# Sidebar: Built-in files status + optional override uploaders
 with st.sidebar:
     st.divider()
-    st.subheader("📁 Built-in Reference Files")
+    st.subheader("📁 Reference Files")
+    st.caption("Built-in files are used by default. Upload newer versions to override.")
+    
+    # Master File
     if os.path.exists(MASTER_FILE_PATH):
         st.success(f"✅ Master: {os.path.basename(MASTER_FILE_PATH)}")
     else:
-        st.error(f"❌ Master NOT FOUND")
+        st.error("❌ Master NOT FOUND")
+    master_upload = st.file_uploader("📤 Upload updated Master (optional)", type=["xlsx", "xls", "csv"], key="master_override")
+    
+    # Lulu Order Form
     if os.path.exists(LULU_ORDER_PATH):
         st.success(f"✅ Lulu: {os.path.basename(LULU_ORDER_PATH)}")
     else:
-        st.warning(f"⚠️ Lulu Order Form missing")
+        st.warning("⚠️ Lulu Order Form missing")
+    lulu_upload = st.file_uploader("📤 Upload updated Lulu Order (optional)", type=["xlsx", "xls", "csv"], key="lulu_override")
+    
+    # Nesto Order Form
     if os.path.exists(NESTO_ORDER_PATH):
         st.success(f"✅ Nesto: {os.path.basename(NESTO_ORDER_PATH)}")
     else:
-        st.warning(f"⚠️ Nesto Order Form missing")
+        st.warning("⚠️ Nesto Order Form missing")
+    nesto_upload = st.file_uploader("📤 Upload updated Nesto Order (optional)", type=["xlsx", "xls", "csv"], key="nesto_override")
 
 # Determine which input to use
 use_whsmith = bool(whsmith_text and whsmith_text.strip())
@@ -815,9 +855,17 @@ if po_file is not None or use_whsmith:
             if parsed_po_df is not None:
                 st.success(f"✅ Parsed {len(parsed_po_df)} items from WHSmith email")
                 
-                # OTR→EA Conversion: Load Master File conversion data from hardcoded path
+                # OTR→EA Conversion: use uploaded master if available, else hardcoded
                 try:
-                    df_conv = pd.read_excel(MASTER_FILE_PATH, sheet_name='ZDET-PRICE', header=None)
+                    if master_upload is not None:
+                        master_upload.seek(0)
+                        if master_upload.name.endswith('.csv'):
+                            df_conv = pd.read_csv(master_upload, header=None)
+                        else:
+                            df_conv = pd.read_excel(master_upload, sheet_name='ZDET-PRICE', header=None)
+                        master_upload.seek(0)  # Reset for apply_mappings later
+                    else:
+                        df_conv = pd.read_excel(MASTER_FILE_PATH, sheet_name='ZDET-PRICE', header=None)
                     
                     # Find header row
                     conv_header_idx = None
@@ -895,7 +943,10 @@ if po_file is not None or use_whsmith:
             if 'True Quantity' not in parsed_po_df.columns and 'Quantity' in parsed_po_df.columns:
                 parsed_po_df['True Quantity'] = parsed_po_df['Quantity']
             
-            final_df = apply_mappings(parsed_po_df)
+            final_df = apply_mappings(parsed_po_df, 
+                                       master_override=master_upload,
+                                       lulu_override=lulu_upload,
+                                       nesto_override=nesto_upload)
             
             if final_df is not None:
                 st.subheader("📊 Final Output Table")
