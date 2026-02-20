@@ -601,11 +601,10 @@ def apply_mappings(df_po):
         # Load Nesto Order Form (secondary fallback)
         _, nesto_bc, nesto_ret, nesto_desc, nesto_fuzzy = load_order_form(NESTO_ORDER_PATH, "Nesto Order Form")
         
-        # Merge: Lulu first (primary), Nesto fills gaps (secondary)
-        order_barcode_dict = {**nesto_bc, **lulu_bc}      # Lulu overwrites Nesto on conflicts
-        order_retailer_dict = {**nesto_ret, **lulu_ret}
+        # Keep separate for provenance tracking (L2-1 Lulu vs L2-2 Nesto)
+        # Combined dicts for L5 (exact desc) and L7 (fuzzy) where source doesn't matter as much
         order_desc_dict = {**nesto_desc, **lulu_desc}
-        order_fuzzy_list = lulu_fuzzy + nesto_fuzzy  # Both lists combined for fuzzy search
+        order_fuzzy_list = lulu_fuzzy + nesto_fuzzy
         
         lulu_count = len(lulu_bc) + len(lulu_ret) + len(lulu_desc)
         nesto_count = len(nesto_bc) + len(nesto_ret) + len(nesto_desc)
@@ -695,15 +694,25 @@ def apply_mappings(df_po):
                     kr, src_row = master_gtin_dict[barcode]
                     return pd.Series([kr, "L1: Master (GTIN)", barcode, src_row])
                     
-                # Layer 2: Order Form Barcode
-                if barcode != "" and barcode in order_barcode_dict:
-                    kr, src_row = order_barcode_dict[barcode]
-                    return pd.Series([kr, "L2: Order (Barcode)", barcode, src_row])
+                # Layer 2-1: Lulu Order Form Barcode
+                if barcode != "" and barcode in lulu_bc:
+                    kr, src_row = lulu_bc[barcode]
+                    return pd.Series([kr, "L2-1: Lulu (Barcode)", barcode, src_row])
+                
+                # Layer 2-2: Nesto Order Form Barcode
+                if barcode != "" and barcode in nesto_bc:
+                    kr, src_row = nesto_bc[barcode]
+                    return pd.Series([kr, "L2-2: Nesto (Barcode)", barcode, src_row])
                     
-                # Layer 3: Order Form Retailer Code
-                if po_article != "" and po_article in order_retailer_dict:
-                    kr, src_row = order_retailer_dict[po_article]
-                    return pd.Series([kr, "L3: Order (Retailer)", po_article, src_row])
+                # Layer 3-1: Lulu Retailer Code
+                if po_article != "" and po_article in lulu_ret:
+                    kr, src_row = lulu_ret[po_article]
+                    return pd.Series([kr, "L3-1: Lulu (Retailer)", po_article, src_row])
+                
+                # Layer 3-2: Nesto Retailer Code
+                if po_article != "" and po_article in nesto_ret:
+                    kr, src_row = nesto_ret[po_article]
+                    return pd.Series([kr, "L3-2: Nesto (Retailer)", po_article, src_row])
                     
                 # Layer 4: Master File Exact Description
                 if desc != "" and desc in master_desc_dict:
