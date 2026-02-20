@@ -7,11 +7,18 @@ import io
 import requests
 from difflib import SequenceMatcher
 from ocr_lib import get_carrefour_data, parse_carrefour_excel
+import os
 
 # Set up the web page
 st.set_page_config(page_title="Universal PO & Multi-Layer Mapper", layout="wide")
 st.title("📄 Universal PO Converter & Multi-Layer Mapper")
-st.markdown("Works for **LuLu, Nesto, & Carrefour (Fax)**! Upload your **Master File**, the **Retailer Order Form** (Fallback), and the **PDF PO**. The app dynamically adapts to different column names to find the exact KR CODE!")
+st.markdown("Works for **LuLu, Nesto, Talabat, Carrefour & WHSmith**! Upload the **PDF PO** or paste WHSmith email text. Master File & Order Forms are built-in.")
+
+# --- HARDCODED REFERENCE FILES ---
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MASTER_FILE_PATH = os.path.join(SCRIPT_DIR, "Bel Article Master 12.25.xlsx")
+LULU_ORDER_PATH = os.path.join(SCRIPT_DIR, "Lulu Order Form 8.24 (1).xlsx")
+NESTO_ORDER_PATH = os.path.join(SCRIPT_DIR, "Nesto Order Form 8.24.xlsx")
 
 # OCR Settings (for scanned PDFs like Carrefour Fax)
 with st.sidebar:
@@ -432,19 +439,20 @@ def process_pdf(pdf_file, api_key=None, ocr_engine='ocrspace', ws_username=None,
         return None
 
 # --- FUNCTION 4: APPLY MULTI-LAYER MAPPING ---
-def apply_mappings(df_po, master_file, order_form_file):
+def apply_mappings(df_po):
     try:
         # ==========================================
-        # 1. LOAD MASTER FILE (ZDET-PRICE)
+        # 1. LOAD MASTER FILE (ZDET-PRICE) — HARDCODED
         # ==========================================
-        if master_file.name.endswith('.csv'):
-            df_master_raw = pd.read_csv(master_file, header=None)
-        else:
-            try:
-                df_master_raw = pd.read_excel(master_file, sheet_name='ZDET-PRICE', header=None)
-            except ValueError:
-                st.error("🚨 Could not find a sheet named 'ZDET-PRICE' in the Master File.")
-                return None
+        if not os.path.exists(MASTER_FILE_PATH):
+            st.error(f"🚨 Master File not found: {MASTER_FILE_PATH}")
+            return None
+        
+        try:
+            df_master_raw = pd.read_excel(MASTER_FILE_PATH, sheet_name='ZDET-PRICE', header=None)
+        except ValueError:
+            st.error("🚨 Could not find a sheet named 'ZDET-PRICE' in the Master File.")
+            return None
 
         df_master = None
         for idx, row in df_master_raw.iterrows():
@@ -520,74 +528,88 @@ def apply_mappings(df_po, master_file, order_form_file):
             return None
 
         # ==========================================
-        # 2. LOAD ORDER FORM (FALLBACK)
+        # 2. LOAD ORDER FORMS (LULU + NESTO DUAL FALLBACK) — HARDCODED
         # ==========================================
         order_barcode_dict, order_retailer_dict, order_desc_dict = {}, {}, {}
         order_fuzzy_list = []
         
-        if order_form_file is not None:
-            if order_form_file.name.endswith('.csv'):
-                df_order_dict = {"CSV": pd.read_csv(order_form_file, header=None)}
-            else:
-                df_order_dict = pd.read_excel(order_form_file, sheet_name=None, header=None)
+        # Helper: load one order form file and extract lookup dicts
+        def load_order_form(filepath, label):
+            if not os.path.exists(filepath):
+                st.warning(f"⚠️ {label} not found: {os.path.basename(filepath)}")
+                return None, {}, {}, {}, []
+            
+            df_order_dict = pd.read_excel(filepath, sheet_name=None, header=None)
             
             df_order = None
-            # Scan all sheets for the Order Form table
             for sheet_name, df_sheet in df_order_dict.items():
                 for idx, row in df_sheet.iterrows():
                     if idx > 100: break
                     row_str = " ".join([str(val).upper() for val in row.values if pd.notnull(val)])
-                    # Match LuLu (BARCODES + KR CODE) OR Nesto (BARCODE + SAP CODE)
                     if ("BARCODES" in row_str or "BARCODE" in row_str) and ("KR CODE" in row_str or "SAP CODE" in row_str):
                         df_sheet.columns = df_sheet.iloc[idx]
                         df_order = df_sheet.iloc[idx + 1:].reset_index(drop=True)
                         break
                 if df_order is not None: break
-                
-            if df_order is not None:
-                df_order = df_order.loc[:, ~df_order.columns.duplicated()]
-                df_order.columns = [str(c).strip().upper() for c in df_order.columns]
-                
-                # DYNAMIC COLUMN IDENTIFICATION (works for both LuLu and Nesto)
-                of_barcode = 'BARCODES' if 'BARCODES' in df_order.columns else ('BARCODE (PER UNIT)' if 'BARCODE (PER UNIT)' in df_order.columns else None)
-                of_kr = 'KR CODE' if 'KR CODE' in df_order.columns else ('SAP CODE' if 'SAP CODE' in df_order.columns else None)
-                of_retailer = 'LULU CODE' if 'LULU CODE' in df_order.columns else ('NESTO CODE' if 'NESTO CODE' in df_order.columns else None)
-                of_desc = 'PRODUCT' if 'PRODUCT' in df_order.columns else ('PRODUCT DESCRIPTION' if 'PRODUCT DESCRIPTION' in df_order.columns else None)
-                
-                # Build Order Form Dictionaries based on what was found
-                # Store (kr_code, source_row) tuples for provenance tracking
-                if of_barcode and of_kr:
-                    df_order[of_barcode] = df_order[of_barcode].apply(clean_key)
-                    order_barcode_dict = {row[of_barcode]: (row[of_kr], idx + 2)
-                                          for idx, row in df_order.iterrows()
-                                          if row[of_barcode] != ""}
-                
-                if of_retailer and of_kr:
-                    df_order[of_retailer] = df_order[of_retailer].apply(clean_key)
-                    order_retailer_dict = {row[of_retailer]: (row[of_kr], idx + 2)
-                                           for idx, row in df_order.iterrows()
-                                           if row[of_retailer] != ""}
-                    
-                if of_desc and of_kr:
-                    df_order[of_desc] = df_order[of_desc].apply(clean_desc)
-                    order_desc_dict = {row[of_desc]: (row[of_kr], idx + 2)
-                                       for idx, row in df_order.iterrows()
-                                       if row[of_desc] != ""}
-                    # Build order form fuzzy list
-                    for idx, row in df_order.iterrows():
-                        desc_val = str(row.get(of_desc, '')).strip()
-                        if desc_val and desc_val.upper() != 'NAN':
-                            order_fuzzy_list.append({
-                                'desc': clean_desc_fuzzy(desc_val),
-                                'article': row.get(of_kr, ''),
-                                'row': idx + 2,
-                                'price': None,
-                                'raw_desc': desc_val
-                            })
-                    
-                st.success(f"✅ Order Form Fallback loaded! ({len(order_fuzzy_list)} items for fuzzy match)")
-            else:
-                st.warning("⚠️ Could not find Barcode & KR/SAP Code headers in the Order Form. Skipping fallback.")
+            
+            if df_order is None:
+                st.warning(f"⚠️ Could not find headers in {label}")
+                return None, {}, {}, {}, []
+            
+            df_order = df_order.loc[:, ~df_order.columns.duplicated()]
+            df_order.columns = [str(c).strip().upper() for c in df_order.columns]
+            
+            of_barcode = 'BARCODES' if 'BARCODES' in df_order.columns else ('BARCODE (PER UNIT)' if 'BARCODE (PER UNIT)' in df_order.columns else None)
+            of_kr = 'KR CODE' if 'KR CODE' in df_order.columns else ('SAP CODE' if 'SAP CODE' in df_order.columns else None)
+            of_retailer = 'LULU CODE' if 'LULU CODE' in df_order.columns else ('NESTO CODE' if 'NESTO CODE' in df_order.columns else None)
+            of_desc = 'PRODUCT' if 'PRODUCT' in df_order.columns else ('PRODUCT DESCRIPTION' if 'PRODUCT DESCRIPTION' in df_order.columns else None)
+            
+            bc_dict, ret_dict, desc_dict, fuzzy_list = {}, {}, {}, []
+            
+            if of_barcode and of_kr:
+                df_order[of_barcode] = df_order[of_barcode].apply(clean_key)
+                bc_dict = {row[of_barcode]: (row[of_kr], idx + 2)
+                           for idx, row in df_order.iterrows()
+                           if row[of_barcode] != ""}
+            
+            if of_retailer and of_kr:
+                df_order[of_retailer] = df_order[of_retailer].apply(clean_key)
+                ret_dict = {row[of_retailer]: (row[of_kr], idx + 2)
+                            for idx, row in df_order.iterrows()
+                            if row[of_retailer] != ""}
+            
+            if of_desc and of_kr:
+                df_order[of_desc] = df_order[of_desc].apply(clean_desc)
+                desc_dict = {row[of_desc]: (row[of_kr], idx + 2)
+                             for idx, row in df_order.iterrows()
+                             if row[of_desc] != ""}
+                for idx, row in df_order.iterrows():
+                    desc_val = str(row.get(of_desc, '')).strip()
+                    if desc_val and desc_val.upper() != 'NAN':
+                        fuzzy_list.append({
+                            'desc': clean_desc_fuzzy(desc_val),
+                            'article': row.get(of_kr, ''),
+                            'row': idx + 2,
+                            'price': None,
+                            'raw_desc': desc_val
+                        })
+            
+            return df_order, bc_dict, ret_dict, desc_dict, fuzzy_list
+        
+        # Load Lulu Order Form (primary fallback)
+        _, lulu_bc, lulu_ret, lulu_desc, lulu_fuzzy = load_order_form(LULU_ORDER_PATH, "Lulu Order Form")
+        # Load Nesto Order Form (secondary fallback)
+        _, nesto_bc, nesto_ret, nesto_desc, nesto_fuzzy = load_order_form(NESTO_ORDER_PATH, "Nesto Order Form")
+        
+        # Merge: Lulu first (primary), Nesto fills gaps (secondary)
+        order_barcode_dict = {**nesto_bc, **lulu_bc}      # Lulu overwrites Nesto on conflicts
+        order_retailer_dict = {**nesto_ret, **lulu_ret}
+        order_desc_dict = {**nesto_desc, **lulu_desc}
+        order_fuzzy_list = lulu_fuzzy + nesto_fuzzy  # Both lists combined for fuzzy search
+        
+        lulu_count = len(lulu_bc) + len(lulu_ret) + len(lulu_desc)
+        nesto_count = len(nesto_bc) + len(nesto_ret) + len(nesto_desc)
+        st.success(f"✅ Dual Order Form loaded! Lulu: {lulu_count} entries, Nesto: {nesto_count} entries, {len(order_fuzzy_list)} fuzzy items")
 
         # ==========================================
         # 3. APPLY MULTI-LAYER MAPPING TO PO
@@ -735,36 +757,44 @@ def apply_mappings(df_po, master_file, order_form_file):
         return None
 
 # --- UI LAYOUT ---
-col1, col2, col3 = st.columns(3)
+col1, col2 = st.columns([2, 1])
 
 with col1:
-    st.subheader("1. Master Mapping")
-    master_file = st.file_uploader("Upload 'Bel Article' File", type=["xlsx", "xls", "csv"])
-
-with col2:
-    st.subheader("2. Order Form (Fallback)")
-    order_file = st.file_uploader("Upload Retailer Order File (Optional)", type=["xlsx", "xls", "csv"])
-
-with col3:
-    st.subheader("3. PO File")
+    st.subheader("📂 Upload PO File")
     po_file = st.file_uploader("Upload PO (PDF or Excel from OCR)", type=["pdf", "xlsx", "xls"])
 
-# WHSmith email paste option
-st.divider()
-with st.expander("📧 **WHSmith Email Order** (Paste text here)", expanded=False):
+with col2:
+    st.subheader("📧 Or Paste WHSmith Email")
     whsmith_text = st.text_area(
-        "Paste the order table from the WHSmith email below:",
+        "Paste WHSmith order here:",
         height=200,
         placeholder="Item_No\nBarcode\nItem_Description\nOrder WK23\n\n1001010023\n87108408\nFruittella Strawberry\n4 OTR\n..."
     )
 
 st.divider()
 
+# Show hardcoded file status
+with st.sidebar:
+    st.divider()
+    st.subheader("📁 Built-in Reference Files")
+    if os.path.exists(MASTER_FILE_PATH):
+        st.success(f"✅ Master: {os.path.basename(MASTER_FILE_PATH)}")
+    else:
+        st.error(f"❌ Master NOT FOUND")
+    if os.path.exists(LULU_ORDER_PATH):
+        st.success(f"✅ Lulu: {os.path.basename(LULU_ORDER_PATH)}")
+    else:
+        st.warning(f"⚠️ Lulu Order Form missing")
+    if os.path.exists(NESTO_ORDER_PATH):
+        st.success(f"✅ Nesto: {os.path.basename(NESTO_ORDER_PATH)}")
+    else:
+        st.warning(f"⚠️ Nesto Order Form missing")
+
 # Determine which input to use
 use_whsmith = bool(whsmith_text and whsmith_text.strip())
 
 # Run the pipeline
-if (po_file is not None or use_whsmith) and master_file is not None:
+if po_file is not None or use_whsmith:
     
     with st.spinner("Processing files and hunting for KR Codes..."):
         parsed_po_df = None
@@ -776,14 +806,9 @@ if (po_file is not None or use_whsmith) and master_file is not None:
             if parsed_po_df is not None:
                 st.success(f"✅ Parsed {len(parsed_po_df)} items from WHSmith email")
                 
-                # OTR→EA Conversion: Load Master File conversion data
+                # OTR→EA Conversion: Load Master File conversion data from hardcoded path
                 try:
-                    master_file.seek(0)
-                    if master_file.name.endswith('.csv'):
-                        df_conv = pd.read_csv(master_file, header=None)
-                    else:
-                        df_conv_dict = pd.read_excel(master_file, sheet_name=None, header=None)
-                        df_conv = df_conv_dict.get('ZDET-PRICE', list(df_conv_dict.values())[0])
+                    df_conv = pd.read_excel(MASTER_FILE_PATH, sheet_name='ZDET-PRICE', header=None)
                     
                     # Find header row
                     conv_header_idx = None
@@ -832,18 +857,15 @@ if (po_file is not None or use_whsmith) and master_file is not None:
                                     converted += 1
                             
                             if converted > 0:
-                                st.success(f"✅ Converted {converted} items: OTR/CV → EA using Den. for Conversion 1")
+                                st.success(f"✅ Converted {converted} items: OTR → EA using Den. for Conversion 1")
                             else:
-                                st.info("ℹ️ No OTR/CV items found to convert (all quantities are already in EA)")
+                                st.info("ℹ️ No OTR items found to convert (all quantities are already in EA)")
                         else:
                             st.warning(f"⚠️ Could not find '{conv_col}' column in Master File")
                     else:
                         st.warning("⚠️ Could not find header row in Master File for conversion")
-                    
-                    master_file.seek(0)  # Reset for apply_mappings
                 except Exception as e:
                     st.warning(f"⚠️ OTR conversion failed: {e}. Quantities kept as-is.")
-                    master_file.seek(0)
             else:
                 st.error("Could not parse any items from the pasted text. Check the format.")
         
@@ -861,11 +883,10 @@ if (po_file is not None or use_whsmith) and master_file is not None:
         
         if parsed_po_df is not None:
             # Normalize: ensure 'True Quantity' exists for all input types
-            # LuLu/Nesto have it from calculate_true_quantity(); OCR/Excel only have 'Quantity'
             if 'True Quantity' not in parsed_po_df.columns and 'Quantity' in parsed_po_df.columns:
                 parsed_po_df['True Quantity'] = parsed_po_df['Quantity']
             
-            final_df = apply_mappings(parsed_po_df, master_file, order_file)
+            final_df = apply_mappings(parsed_po_df)
             
             if final_df is not None:
                 st.subheader("📊 Final Output Table")
@@ -925,5 +946,5 @@ if (po_file is not None or use_whsmith) and master_file is not None:
                 else:
                     st.warning("KR CODE or True Quantity column not found in output.")
 
-elif not use_whsmith and (po_file is None or master_file is None):
-    st.info("Waiting for the Master File and a PO (PDF/Excel) or WHSmith email text to be provided...")
+else:
+    st.info("Upload a PO file (PDF/Excel) or paste WHSmith email text to get started.")
