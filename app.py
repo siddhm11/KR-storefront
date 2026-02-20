@@ -181,8 +181,12 @@ def process_pdf(pdf_file, api_key=None, ocr_engine='ocrspace', ws_username=None,
         # Step 1: Find the header row in the raw list
         header_idx = None
         for i, row in enumerate(all_rows):
-            row_str = " ".join([str(val).upper() for val in row if val is not None])
-            if ("QUANTITY" in row_str or "ORD.QTY" in row_str) and ("UOM" in row_str or "UNIT" in row_str):
+            row_str = " ".join([str(val).upper().replace('\n', ' ') for val in row if val is not None])
+            # Match LuLu (QUANTITY + UOM), Nesto (ORD.QTY + UNIT), or Talabat (QTY + UNIT COST / BARCODE + PRODUCT)
+            has_qty = "QUANTITY" in row_str or "ORD.QTY" in row_str or "QTY" in row_str
+            has_unit = "UOM" in row_str or "UNIT" in row_str
+            has_product = "BARCODE" in row_str and "PRODUCT" in row_str
+            if (has_qty and has_unit) or has_product:
                 header_idx = i
                 break
         
@@ -221,6 +225,8 @@ def process_pdf(pdf_file, api_key=None, ocr_engine='ocrspace', ws_username=None,
         
         # Use the header row we already found
         df.columns = df.iloc[header_idx]
+        # Clean newlines from column names (Talabat has 'Unit\nCost', 'Amt.\nExcl.\nVAT' etc.)
+        df.columns = [str(c).replace('\n', ' ').strip() if pd.notna(c) else c for c in df.columns]
         df = df.iloc[header_idx + 1:].reset_index(drop=True)
         
         first_col_name = df.columns[0]
@@ -233,8 +239,15 @@ def process_pdf(pdf_file, api_key=None, ocr_engine='ocrspace', ws_username=None,
         # DYNAMIC TRUE QUANTITY CALCULATION (Adapts to LuLu & Nesto columns)
         def calculate_true_quantity(row):
             try:
-                # Dynamically fetch Quantity (LuLu = 'Quantity', Nesto = 'Ord.Qty')
-                qty_val = row.get('Quantity') if 'Quantity' in row.index else row.get('Ord.Qty', 0)
+                # Dynamically fetch Quantity (LuLu = 'Quantity', Nesto = 'Ord.Qty', Talabat = 'Qty')
+                if 'Quantity' in row.index:
+                    qty_val = row.get('Quantity')
+                elif 'Ord.Qty' in row.index:
+                    qty_val = row.get('Ord.Qty', 0)
+                elif 'Qty' in row.index:
+                    qty_val = row.get('Qty', 0)
+                else:
+                    qty_val = 0
                 qty = pd.to_numeric(qty_val, errors='coerce')
                 if pd.isna(qty):
                     qty = 0
@@ -262,18 +275,31 @@ def process_pdf(pdf_file, api_key=None, ocr_engine='ocrspace', ws_username=None,
         # Apply True Quantity for any valid PO format
         df['True Quantity'] = df.apply(calculate_true_quantity, axis=1)
         
-        # --- LULU-SPECIFIC: Net Total (Total Value - Tax) ---
-        # Find total and tax columns dynamically
-        total_col = None
-        tax_col = None
+        # --- NET TOTAL calculation (LuLu = Total Value - Tax; Talabat = Amt Excl VAT directly) ---
+        # Check if Talabat's Amt. Excl. VAT column exists (already net total)
+        amt_excl_col = None
         for c in df.columns:
-            cs = str(c).upper() if pd.notna(c) else ''
-            if 'TOTAL' in cs and ('VALUE' in cs or 'WT' in cs or 'VAL' in cs):
-                total_col = c
-            if 'TAX' in cs and ('VAL' in cs or 'AMT' in cs or 'AMOUNT' in cs):
-                tax_col = c
+            cs = str(c).upper().replace('\n', ' ') if pd.notna(c) else ''
+            if 'AMT' in cs and 'EXCL' in cs and 'VAT' in cs:
+                amt_excl_col = c
+                break
         
-        if total_col and tax_col:
+        if amt_excl_col:
+            # Talabat: net total is already given as Amt. Excl. VAT
+            df['Net Total'] = pd.to_numeric(df[amt_excl_col], errors='coerce').round(3)
+            st.info(f"💰 Net Total from **{amt_excl_col.replace(chr(10), ' ')}**")
+        else:
+            # LuLu: calculate Total Value - Tax Val
+            total_col = None
+            tax_col = None
+            for c in df.columns:
+                cs = str(c).upper() if pd.notna(c) else ''
+                if 'TOTAL' in cs and ('VALUE' in cs or 'WT' in cs or 'VAL' in cs):
+                    total_col = c
+                if 'TAX' in cs and ('VAL' in cs or 'AMT' in cs or 'AMOUNT' in cs):
+                    tax_col = c
+        
+        if not amt_excl_col and total_col and tax_col:
             try:
                 total_vals = pd.to_numeric(df[total_col], errors='coerce').fillna(0)
                 tax_vals = pd.to_numeric(df[tax_col], errors='coerce').fillna(0)
@@ -493,8 +519,12 @@ def apply_mappings(df_po, master_file, order_form_file):
         # ==========================================
         # 3. APPLY MULTI-LAYER MAPPING TO PO
         # ==========================================
-        # Dynamically identify PO description column (LuLu vs Nesto)
-        po_desc_col = 'Article Description + Add.Info' if 'Article Description + Add.Info' in df_po.columns else ('Description' if 'Description' in df_po.columns else None)
+        # Dynamically identify PO description column (LuLu/Nesto/Talabat)
+        po_desc_col = None
+        for candidate in ['Article Description + Add.Info', 'Description', 'Product', 'ITEM DESCRITION']:
+            if candidate in df_po.columns:
+                po_desc_col = candidate
+                break
         
         # Find PO price column (LuLu=Gross/PU, Nesto=Unit.Cost, Carrefour=P.PRI B.TAX)
         po_price_col = None
@@ -511,18 +541,37 @@ def apply_mappings(df_po, master_file, order_form_file):
                     break
         
         # Clean PO matching keys safely
-        if 'Barcode' in df_po.columns: df_po['Barcode_Clean'] = df_po['Barcode'].apply(clean_key)
-        else: df_po['Barcode_Clean'] = ""
-            
+        # Handle different barcode column names
+        barcode_col = None
+        for bcol in ['Barcode', 'BARCODE', 'BAR CODE']:
+            if bcol in df_po.columns:
+                barcode_col = bcol
+                break
+        if barcode_col:
+            df_po['Barcode'] = df_po[barcode_col]  # Normalize to 'Barcode'
+            df_po['Barcode_Clean'] = df_po[barcode_col].apply(clean_key)
+        else:
+            df_po['Barcode_Clean'] = ""
+        
+        # Handle different article/supplier ref column names
+        article_col = None
+        for acol in ['Article', 'Supplier SKU', 'SUPPLIER REF', 'SKU']:
+            if acol in df_po.columns:
+                article_col = acol
+                break
+        if article_col:
+            df_po['Article'] = df_po[article_col]  # Normalize to 'Article'
+            df_po['Article Code'] = df_po[article_col].apply(clean_key)
+        else:
+            df_po['Article Code'] = ""
+        
+        # Clean descriptions for matching
         if po_desc_col: df_po['Clean PO Desc'] = df_po[po_desc_col].apply(clean_desc)
         else: df_po['Clean PO Desc'] = ""
         
         # Also build fuzzy-friendly PO description
         if po_desc_col: df_po['Fuzzy PO Desc'] = df_po[po_desc_col].apply(clean_desc_fuzzy)
         else: df_po['Fuzzy PO Desc'] = ""
-            
-        if 'Article' in df_po.columns: df_po['Article Code'] = df_po['Article'].apply(clean_key)
-        else: df_po['Article Code'] = ""
         
         # Extract PO price for each row
         # Prefer 'Unit Price' (per-piece, calculated in process_pdf) over raw Gross/PU
@@ -677,6 +726,38 @@ if po_file is not None and master_file is not None:
                         file_name="Final_Mapped_Order.csv",
                         mime="text/csv"
                     )
+                
+                # --- COPY BUTTON: KR CODE + True Quantity ---
+                st.divider()
+                st.subheader("📋 Quick Copy: KR CODE + True Quantity")
+                
+                # Build copy-ready text (tab-separated for easy paste into Excel)
+                copy_cols = ['KR CODE', 'True Quantity']
+                if all(c in final_df.columns for c in copy_cols):
+                    copy_df = final_df[copy_cols].copy()
+                    # Format as tab-separated text
+                    copy_text = "KR CODE\tTrue Quantity\n"
+                    for _, row in copy_df.iterrows():
+                        kr = str(row['KR CODE']) if pd.notna(row['KR CODE']) else ''
+                        qty = str(row['True Quantity']) if pd.notna(row['True Quantity']) else ''
+                        copy_text += f"{kr}\t{qty}\n"
+                    
+                    st.text_area(
+                        "Select all → Copy (Ctrl+A, Ctrl+C)",
+                        value=copy_text.strip(),
+                        height=min(200, 40 + len(copy_df) * 20),
+                        help="Tab-separated format — paste directly into Excel or Google Sheets"
+                    )
+                    
+                    # Also offer as download for convenience
+                    st.download_button(
+                        label="📋 Download KR CODE + Qty Only",
+                        data=copy_text.encode('utf-8'),
+                        file_name="KR_CODE_Qty.tsv",
+                        mime="text/tab-separated-values"
+                    )
+                else:
+                    st.warning("KR CODE or True Quantity column not found in output.")
 
 elif po_file is None or master_file is None:
     st.info("Waiting for the Master File and PDF PO to be uploaded...")
