@@ -261,6 +261,71 @@ def process_pdf(pdf_file, api_key=None, ocr_engine='ocrspace', ws_username=None,
 
         # Apply True Quantity for any valid PO format
         df['True Quantity'] = df.apply(calculate_true_quantity, axis=1)
+        
+        # --- LULU-SPECIFIC: Net Total (Total Value - Tax) ---
+        # Find total and tax columns dynamically
+        total_col = None
+        tax_col = None
+        for c in df.columns:
+            cs = str(c).upper() if pd.notna(c) else ''
+            if 'TOTAL' in cs and ('VALUE' in cs or 'WT' in cs or 'VAL' in cs):
+                total_col = c
+            if 'TAX' in cs and ('VAL' in cs or 'AMT' in cs or 'AMOUNT' in cs):
+                tax_col = c
+        
+        if total_col and tax_col:
+            try:
+                total_vals = pd.to_numeric(df[total_col], errors='coerce').fillna(0)
+                tax_vals = pd.to_numeric(df[tax_col], errors='coerce').fillna(0)
+                df['Net Total'] = (total_vals - tax_vals).round(3)
+                st.info(f"💰 Net Total calculated: **{total_col}** − **{tax_col}**")
+            except Exception as e:
+                st.warning(f"Could not calculate Net Total: {e}")
+        
+        # --- LULU-SPECIFIC: Per-piece Unit Price for price matching ---
+        # Gross/PU is price per packaging unit (e.g., per carton of 6)
+        # For accurate matching vs Master File (which has per-piece prices),
+        # we need:  Unit Price = Gross/PU ÷ pieces_per_carton
+        gross_col = None
+        for c in df.columns:
+            cs = str(c).upper() if pd.notna(c) else ''
+            if 'GROSS' in cs and ('PU' in cs or 'UNIT' in cs):
+                gross_col = c
+                break
+        if gross_col is None:
+            for c in df.columns:
+                cs = str(c).upper() if pd.notna(c) else ''
+                if 'UNIT' in cs and ('COST' in cs or 'PRICE' in cs):
+                    gross_col = c
+                    break
+        
+        if gross_col:
+            def calc_unit_price(row):
+                try:
+                    gross = pd.to_numeric(row.get(gross_col, 0), errors='coerce')
+                    if pd.isna(gross) or gross == 0:
+                        return None
+                    
+                    # Get UOM multiplier (same logic as calculate_true_quantity)
+                    if 'UOM' in row.index:
+                        uom_val = row.get('UOM', '')
+                    elif 'UnitConv.' in row.index:
+                        uom_val = row.get('UnitConv.', '')
+                    else:
+                        uom_val = row.get('Unit', '')
+                    uom = str(uom_val).upper()
+                    
+                    match = re.search(r'(\d+)\s*EA', uom)
+                    multiplier = float(match.group(1)) if match else 1.0
+                    
+                    unit_price = gross / multiplier
+                    return round(unit_price, 3)
+                except Exception:
+                    return None
+            
+            df['Unit Price'] = df.apply(calc_unit_price, axis=1)
+            st.info(f"💰 Unit Price calculated: **{gross_col}** ÷ UOM multiplier")
+        
         return df
 
     except Exception as e:
@@ -460,7 +525,11 @@ def apply_mappings(df_po, master_file, order_form_file):
         else: df_po['Article Code'] = ""
         
         # Extract PO price for each row
-        if po_price_col:
+        # Prefer 'Unit Price' (per-piece, calculated in process_pdf) over raw Gross/PU
+        if 'Unit Price' in df_po.columns:
+            df_po['PO_Price'] = pd.to_numeric(df_po['Unit Price'], errors='coerce')
+            st.info("📊 Using **per-piece Unit Price** for price matching (Gross/PU ÷ UOM)")
+        elif po_price_col:
             df_po['PO_Price'] = pd.to_numeric(df_po[po_price_col], errors='coerce')
         else:
             df_po['PO_Price'] = np.nan
@@ -531,7 +600,7 @@ def apply_mappings(df_po, master_file, order_form_file):
         df_po[['KR CODE', 'Match Source', 'Match Key', 'Source Row']] = df_po.apply(find_kr_code, axis=1)
 
         # Output correct columns based on file type
-        desired_columns = ['KR CODE', 'True Quantity', 'Match Source', 'Match Key', 'Source Row', 'FAM', 'Barcode', 'Article']
+        desired_columns = ['KR CODE', 'True Quantity', 'Net Total', 'Unit Price', 'Match Source', 'Match Key', 'Source Row', 'FAM', 'Barcode', 'Article']
         if po_desc_col: desired_columns.append(po_desc_col)
         
         final_cols = [col for col in desired_columns if col in df_po.columns]
