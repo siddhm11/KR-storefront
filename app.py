@@ -20,23 +20,17 @@ MASTER_FILE_PATH = os.path.join(SCRIPT_DIR, "Bel Article Master 12.25.xlsx")
 LULU_ORDER_PATH = os.path.join(SCRIPT_DIR, "Lulu Order Form 8.24 (1).xlsx")
 NESTO_ORDER_PATH = os.path.join(SCRIPT_DIR, "Nesto Order Form 8.24.xlsx")
 
-# OCR Settings (for scanned PDFs like Carrefour Fax)
+# --- HARDCODED OCR CREDENTIALS (ocrwebservice.com) ---
+# Uses webservice engine for best quality; OCR.space as automatic fallback.
+ocr_engine = 'webservice'
+ws_username = 'krtrial'
+ws_license = '96C8A75B-0EDC-42E2-8594-3B95D6DBCB27'
+ocr_api_key = 'helloworld'  # Fallback OCR.space key
+
 with st.sidebar:
     st.header("OCR Settings (Carrefour Fax)")
-    ocr_engine = st.selectbox("OCR Engine", ["ocrspace", "webservice"], index=0,
-        help="'webservice' = onlineocr.net engine (better quality, needs signup). 'ocrspace' = free fallback.")
-    
-    if ocr_engine == 'webservice':
-        st.markdown("[Sign up free at ocrwebservice.com](https://www.ocrwebservice.com/account/signup) — 25 pages/day")
-        ws_username = st.text_input("Username", help="Your ocrwebservice.com username")
-        ws_license = st.text_input("License Code", type="password", help="Your ocrwebservice.com license code")
-        ocr_api_key = None
-    else:
-        ocr_api_key = st.text_input("OCR.space API Key", value="helloworld", type="password", help="Get a free key from https://ocr.space/ocrapi")
-        ws_username = None
-        ws_license = None
-        st.info("Default 'helloworld' key works for testing but is rate-limited.")
-    
+    st.success("✅ OCR is pre-configured and ready to use.")
+    st.markdown("Scanned PDFs (e.g. Carrefour fax) will be auto-processed using the built-in OCR engine.")
     st.divider()
     st.markdown("**Tip:** For best results, convert the fax to Excel on [onlineocr.net](https://www.onlineocr.net) and upload the Excel directly as your PO file.")
 
