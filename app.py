@@ -8,6 +8,7 @@ import requests
 from difflib import SequenceMatcher
 from ocr_lib import get_carrefour_data, parse_carrefour_excel
 import os
+import streamlit.components.v1 as components
 
 # Set up the web page
 st.set_page_config(page_title="Universal PO & Multi-Layer Mapper", layout="wide")
@@ -790,6 +791,8 @@ def apply_mappings(df_po, master_override=None, lulu_override=None, nesto_overri
         return None
 
 # --- UI LAYOUT ---
+# Anchor: top of page (for "Back to Top" button)
+st.markdown('<div id="top-anchor"></div>', unsafe_allow_html=True)
 col1, col2 = st.columns([2, 1])
 
 with col1:
@@ -943,8 +946,18 @@ if po_file is not None or use_whsmith:
                                        nesto_override=nesto_upload)
             
             if final_df is not None:
+                # Anchor + auto-scroll to results
+                st.markdown('<div id="results-anchor"></div>', unsafe_allow_html=True)
                 st.subheader("📊 Final Output Table")
                 st.dataframe(final_df, use_container_width=True)
+                
+                # Auto-scroll to the results table
+                components.html("""
+                    <script>
+                        const el = window.parent.document.getElementById('results-anchor');
+                        if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+                    </script>
+                """, height=0)
                 
                 # Prepare Downloads
                 csv_buffer = final_df.to_csv(index=False).encode('utf-8')
@@ -999,6 +1012,39 @@ if po_file is not None or use_whsmith:
                     )
                 else:
                     st.warning("KR CODE or True Quantity column not found in output.")
+                
+                # --- FLOATING "BACK TO TOP" BUTTON ---
+                st.markdown("""
+                    <style>
+                    .back-to-top-btn {
+                        position: fixed;
+                        bottom: 30px;
+                        right: 30px;
+                        z-index: 9999;
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        color: white;
+                        border: none;
+                        border-radius: 50px;
+                        padding: 14px 22px;
+                        font-size: 16px;
+                        font-weight: 600;
+                        cursor: pointer;
+                        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+                        transition: all 0.3s ease;
+                        text-decoration: none;
+                    }
+                    .back-to-top-btn:hover {
+                        transform: translateY(-2px);
+                        box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+                        color: white;
+                    }
+                    </style>
+                    <a href="#top-anchor" class="back-to-top-btn" onclick="
+                        var el = window.parent.document.getElementById('top-anchor');
+                        if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+                        return false;
+                    ">⬆ Back to Top</a>
+                """, unsafe_allow_html=True)
 
 else:
     st.info("Upload a PO file (PDF/Excel) or paste WHSmith email text to get started.")
