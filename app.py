@@ -749,11 +749,11 @@ def apply_mappings(df_po, master_override=None, lulu_override=None, nesto_overri
                     kr, src_row = order_desc_dict[desc]
                     return pd.Series([kr, "L5: Order (Desc)", desc[:40], src_row])
                 
-                # Layer 6: Master File Price + Fuzzy Desc (price match ±5%, desc 60%+)
-                # Price confirmation is a strong signal — try this before pure fuzzy
+                # Layer 6: Master File Price + Fuzzy Desc (exact price, desc 70%+)
+                # Exact price match + fuzzy desc = high confidence match
                 if po_price is not None and po_price > 0 and fuzzy_desc != "":
                     best = fuzzy_match_with_price(fuzzy_desc, po_price, master_fuzzy_list, 
-                                                  price_tolerance=0.05, desc_threshold=0.60)
+                                                  price_tolerance=0, desc_threshold=0.70)
                     if best:
                         kr, src_row, matched, score = best
                         return pd.Series([kr, f"L6: Master (Price+Fuzzy {score:.0%})", matched[:35], src_row])
