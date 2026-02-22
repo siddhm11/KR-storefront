@@ -749,12 +749,14 @@ def apply_mappings(df_po, master_override=None, lulu_override=None, nesto_overri
                     kr, src_row = order_desc_dict[desc]
                     return pd.Series([kr, "L5: Order (Desc)", desc[:40], src_row])
                 
-                # Layer 6: Master File Fuzzy Description (70%+ similarity)
-                if fuzzy_desc != "":
-                    best = fuzzy_match_desc(fuzzy_desc, master_fuzzy_list, threshold=0.70)
+                # Layer 6: Master File Price + Fuzzy Desc (price match ±5%, desc 60%+)
+                # Price confirmation is a strong signal — try this before pure fuzzy
+                if po_price is not None and po_price > 0 and fuzzy_desc != "":
+                    best = fuzzy_match_with_price(fuzzy_desc, po_price, master_fuzzy_list, 
+                                                  price_tolerance=0.05, desc_threshold=0.60)
                     if best:
                         kr, src_row, matched, score = best
-                        return pd.Series([kr, f"L6: Master (Fuzzy {score:.0%})", matched[:35], src_row])
+                        return pd.Series([kr, f"L6: Master (Price+Fuzzy {score:.0%})", matched[:35], src_row])
                 
                 # Layer 7: Order Form Fuzzy Description (70%+ similarity)
                 if fuzzy_desc != "" and order_fuzzy_list:
@@ -763,13 +765,13 @@ def apply_mappings(df_po, master_override=None, lulu_override=None, nesto_overri
                         kr, src_row, matched, score = best
                         return pd.Series([kr, f"L7: Order (Fuzzy {score:.0%})", matched[:35], src_row])
                 
-                # Layer 8: Master File Price + Fuzzy Desc (price match ±5%, desc 60%+)
-                if po_price is not None and po_price > 0 and fuzzy_desc != "":
-                    best = fuzzy_match_with_price(fuzzy_desc, po_price, master_fuzzy_list, 
-                                                  price_tolerance=0.05, desc_threshold=0.60)
+                # Layer 8: Master File Fuzzy Description (70%+ similarity)
+                # Pure fuzzy (no price check) — last resort, higher false-match risk
+                if fuzzy_desc != "":
+                    best = fuzzy_match_desc(fuzzy_desc, master_fuzzy_list, threshold=0.70)
                     if best:
                         kr, src_row, matched, score = best
-                        return pd.Series([kr, f"L8: Master (Price+Fuzzy {score:.0%})", matched[:35], src_row])
+                        return pd.Series([kr, f"L8: Master (Fuzzy {score:.0%})", matched[:35], src_row])
                     
                 return pd.Series(["Not Found", "-", "-", "-"])
             except Exception as e:
